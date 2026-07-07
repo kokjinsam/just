@@ -38,20 +38,16 @@ just test
 ## Repository Config
 
 Each consuming repository owns its local `just.yaml`. The shared scripts read it
-to discover app paths and tool versions:
+to discover app paths:
 
 ```yaml
 apps:
-  umber:
-    path: apps/umber
+  my-app:
+    path: apps/my-app
   workspace:
     path: apps/workspace
   website:
     path: apps/website
-
-tools:
-  tla: "1.8.0"
-  alloy: "6.2.0"
 ```
 
 ## Updating
@@ -62,12 +58,4 @@ specific branch, tag, or commit:
 ```bash
 KOKJINSAM_JUST_REF=v0.1.0 \
   curl -fsSL https://raw.githubusercontent.com/kokjinsam/just/main/bootstrap | bash
-```
-
-For local validation from a consuming repository root against a local
-`agent-config` checkout:
-
-```bash
-KOKJINSAM_JUST_BASE_URL=file:///Users/sammkj/Developer/just \
-  bash /Users/sammkj/Developer/just/bootstrap
 ```

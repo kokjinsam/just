@@ -9,7 +9,6 @@ repo_root() {
 REPO_ROOT="${REPO_ROOT:-$(repo_root)}"
 JUST_ROOT="${JUST_ROOT:-$REPO_ROOT/.just}"
 JUST_CONFIG="${JUST_CONFIG:-$REPO_ROOT/just.yaml}"
-TOOLS_DIR="${TOOLS_DIR:-$REPO_ROOT/.tools}"
 JUST_CALLER_DIR="${JUST_CALLER_DIR:-$REPO_ROOT}"
 JUST_STEP_LABELS=()
 JUST_STEP_CWDS=()
@@ -303,63 +302,6 @@ relative_path() {
   fi
 }
 
-yaml_tool_entries() {
-  require_config
-
-  awk '
-    function trim(value) {
-      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", value)
-      return value
-    }
-
-    /^[[:space:]]*#/ || /^[[:space:]]*$/ {
-      next
-    }
-
-    /^[^[:space:]][^:]*:[[:space:]]*$/ {
-      section = $0
-      sub(/:.*/, "", section)
-      section = trim(section)
-      next
-    }
-
-    section == "tools" && /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*/ {
-      line = $0
-      sub(/[[:space:]]*#.*/, "", line)
-      gsub(/"/, "", line)
-
-      name = line
-      sub(/:.*/, "", name)
-      name = trim(name)
-
-      value = line
-      sub(/^[^:]*:/, "", value)
-      value = trim(value)
-
-      if (name != "" && value != "") {
-        print name " " value
-      }
-    }
-  ' "$JUST_CONFIG"
-}
-
-yaml_tool_version() {
-  local expected_name="$1"
-
-  yaml_tool_entries | awk -v expected_name="$expected_name" '
-    $1 == expected_name {
-      print $2
-      found = 1
-      exit
-    }
-    END {
-      if (!found) {
-        exit 1
-      }
-    }
-  '
-}
-
 yaml_app_entries() {
   require_config
 
@@ -515,23 +457,4 @@ node_install_roots() {
   fi
 
   return 0
-}
-
-tool_jar() {
-  local tool="$1"
-  local version
-
-  version="$(yaml_tool_version "$tool")" || die "tool '$tool' is not configured in just.yaml"
-
-  case "$tool" in
-  tla)
-    printf "%s/tla/%s/tla2tools.jar\n" "$TOOLS_DIR" "$version"
-    ;;
-  alloy)
-    printf "%s/alloy/%s/org.alloytools.alloy.dist.jar\n" "$TOOLS_DIR" "$version"
-    ;;
-  *)
-    die "unknown tool: $tool"
-    ;;
-  esac
 }

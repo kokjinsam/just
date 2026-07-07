@@ -61,6 +61,21 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "checks formal specs through asdf shims"
+    When call test_check_specs_uses_asdf_shims
+    The status should equal 0
+  End
+
+  It "installs project dependencies with plain install"
+    When call test_install_runs_project_dependency_installs
+    The status should equal 0
+  End
+
+  It "adds npm dependencies through a direct install selector"
+    When call test_install_npm_dep_uses_direct_selector
+    The status should equal 0
+  End
+
   It "installs Hex dependencies through a temp mix.exs and compact summary"
     When call test_install_hex_dep_uses_temp_mix_exs_and_compact_summary
     The status should equal 0

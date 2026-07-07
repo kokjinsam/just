@@ -109,11 +109,12 @@ parse_app_option() {
   printf "%s\n" "$app"
 }
 
-remove_deps() {
+remove_targets() {
   local selector="${1:-}"
   local app
 
-  if [[ -z "$selector" ]]; then
+  if [[ -z "$selector" || "$selector" == "all" ]]; then
+    [[ "$#" -le 1 ]] || die "just remove all does not accept extra arguments"
     remove_elixir_deps
     remove_node_deps
     return
@@ -136,30 +137,21 @@ remove_deps() {
     app="$(parse_app_option "$@")"
     remove_hex_package "${selector#hex:}" "$app"
     ;;
+  deps)
+    die "the deps scope was removed; use 'just remove', 'just remove npm:<pkg> --app <app>', or 'just remove hex:<pkg> --app <app>'"
+    ;;
+  tools)
+    printf "Tools are managed by asdf. Use 'asdf uninstall <tool> <version>' for a specific tool version.\n"
+    ;;
   *)
-    die "unknown remove deps selector: $selector"
+    die "unknown remove selector: $selector"
     ;;
   esac
 }
 
 main() {
   cd "$REPO_ROOT"
-
-  case "${1:-}" in
-  "")
-    bash "$JUST_ROOT/commands/help"
-    ;;
-  deps)
-    shift
-    remove_deps "$@"
-    ;;
-  tools)
-    run_step "Remove Tools" "$REPO_ROOT" rm -rf .tools
-    ;;
-  *)
-    die "unknown remove target: $1"
-    ;;
-  esac
+  remove_targets "$@"
 }
 
 main "$@"

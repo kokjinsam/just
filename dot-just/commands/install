@@ -4,115 +4,6 @@ set -euo pipefail
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
 
-download() {
-  local url="$1"
-  local destination="$2"
-  local tmp
-
-  mkdir -p "$(dirname -- "$destination")"
-  tmp="$(mktemp "$destination.tmp.XXXXXX")"
-
-  if ! curl -fsSL --retry 3 --retry-delay 1 -o "$tmp" "$url"; then
-    rm -f "$tmp"
-    return 1
-  fi
-
-  mv "$tmp" "$destination"
-}
-
-write_tla_shim() {
-  local version="$1"
-  local shim="$TOOLS_DIR/bin/tla"
-
-  mkdir -p "$(dirname -- "$shim")"
-
-  cat >"$shim" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-TOOLS_DIR="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
-exec java -jar "\$TOOLS_DIR/tla/$version/tla2tools.jar" "\$@"
-EOF
-
-  chmod +x "$shim"
-}
-
-write_alloy_shim() {
-  local version="$1"
-  local shim="$TOOLS_DIR/bin/alloy"
-
-  mkdir -p "$(dirname -- "$shim")"
-
-  cat >"$shim" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-TOOLS_DIR="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
-exec java -jar "\$TOOLS_DIR/alloy/$version/org.alloytools.alloy.dist.jar" "\$@"
-EOF
-
-  chmod +x "$shim"
-}
-
-install_tla() {
-  local version="$1"
-  local destination="$TOOLS_DIR/tla/$version/tla2tools.jar"
-  local url="https://github.com/tlaplus/tlaplus/releases/download/v$version/tla2tools.jar"
-
-  if [[ -s "$destination" ]]; then
-    printf "tla %s already installed at %s\n" "$version" "$destination"
-  else
-    printf "Installing tla %s...\n" "$version"
-    download "$url" "$destination" ||
-      die "could not download tla $version from $url"
-  fi
-
-  write_tla_shim "$version"
-}
-
-install_alloy() {
-  local version="$1"
-  local destination="$TOOLS_DIR/alloy/$version/org.alloytools.alloy.dist.jar"
-  local url="https://repo1.maven.org/maven2/org/alloytools/org.alloytools.alloy.dist/$version/org.alloytools.alloy.dist-$version.jar"
-
-  if [[ -s "$destination" ]]; then
-    printf "alloy %s already installed at %s\n" "$version" "$destination"
-  else
-    printf "Installing alloy %s...\n" "$version"
-    download "$url" "$destination" ||
-      die "could not download alloy $version from $url"
-  fi
-
-  write_alloy_shim "$version"
-}
-
-install_tools() {
-  local name
-  local version
-  local saw_tool=0
-
-  require_command curl
-  require_command java
-
-  while read -r name version; do
-    saw_tool=1
-
-    case "$name" in
-    tla)
-      install_tla "$version"
-      ;;
-    alloy)
-      install_alloy "$version"
-      ;;
-    *)
-      die "unknown tool in just.yaml: $name"
-      ;;
-    esac
-  done < <(yaml_tool_entries)
-
-  [[ "$saw_tool" -eq 1 ]] || die "no tools configured in just.yaml"
-}
-
 install_elixir_deps() {
   local app
   local root
@@ -219,56 +110,45 @@ parse_app_option() {
   printf "%s\n" "$app"
 }
 
-install_deps() {
+install_targets() {
   local selector="${1:-}"
   local version="${2:-}"
   local app
 
-  if [[ -z "$selector" ]]; then
+  if [[ -z "$selector" || "$selector" == "all" ]]; then
+    [[ "$#" -le 1 ]] || die "just install all does not accept extra arguments"
     install_all_deps
     return
   fi
 
   case "$selector" in
   npm:*)
-    [[ "$#" -ge 2 ]] || die "usage: just install deps npm:<pkg> <version> --app <app>"
+    [[ "$#" -ge 2 ]] || die "usage: just install npm:<pkg> <version> --app <app>"
     shift 2
     app="$(parse_app_option "$@")"
     install_npm_package "${selector#npm:}" "$version" "$app"
     ;;
   hex:*)
-    [[ "$#" -ge 2 ]] || die "usage: just install deps hex:<pkg> <version> --app <app>"
+    [[ "$#" -ge 2 ]] || die "usage: just install hex:<pkg> <version> --app <app>"
     shift 2
     app="$(parse_app_option "$@")"
     install_hex_package "${selector#hex:}" "$version" "$app"
     ;;
+  deps)
+    die "the deps scope was removed; use 'just install', 'just install npm:<pkg> <version> --app <app>', or 'just install hex:<pkg> <version> --app <app>'"
+    ;;
+  tools)
+    die "tools are managed by asdf; run 'asdf install'"
+    ;;
   *)
-    die "unknown install deps selector: $selector"
+    die "unknown install selector: $selector"
     ;;
   esac
 }
 
 main() {
   cd "$REPO_ROOT"
-
-  case "${1:-}" in
-  "" | all)
-    install_tools
-    install_all_deps
-    ;;
-  tools)
-    shift
-    [[ "$#" -eq 0 ]] || die "just install tools does not accept extra arguments"
-    install_tools
-    ;;
-  deps)
-    shift
-    install_deps "$@"
-    ;;
-  *)
-    die "unknown install target: $1"
-    ;;
-  esac
+  install_targets "$@"
 }
 
 main "$@"

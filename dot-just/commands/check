@@ -134,45 +134,53 @@ unique_typecheck_roots() {
   done
 }
 
-require_jar() {
-  local jar="$1"
-  local tool="$2"
+require_tool_command() {
+  local command="$1"
+  local plugin="$2"
 
-  [[ -s "$jar" ]] ||
-    die "$tool is not installed at $jar; run 'just install tools' first"
+  command -v "$command" >/dev/null 2>&1 ||
+    die "missing required command: $command; run 'asdf install' after adding the '$plugin' asdf plugin"
 }
 
 check_tla_module() {
-  local jar="$1"
-  local file="$2"
+  local file="$1"
   local display_command
+  local relative_file
 
-  display_command="$(command_string java -cp "$(relative_path "$jar")" tla2sany.SANY "$(relative_path "$file")")"
+  require_tool_command sany tlaplus
+  relative_file="$(relative_path "$file")"
+  display_command="$(command_string sany "$relative_file")"
   JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "TLA SANY" "$REPO_ROOT" java -cp "$jar" tla2sany.SANY "$file"
+    collect_step "TLA SANY" "$REPO_ROOT" sany "$relative_file"
 }
 
 check_tla_model() {
-  local jar="$1"
-  local cfg="$2"
+  local cfg="$1"
   local tla="${cfg%.cfg}.tla"
   local display_command
+  local relative_cfg
+  local relative_tla
 
   [[ -f "$tla" ]] || die "cannot find TLA module for config: $cfg"
 
-  display_command="$(command_string java -jar "$(relative_path "$jar")" -config "$(relative_path "$cfg")" "$(relative_path "$tla")")"
+  require_tool_command tlc tlaplus
+  relative_cfg="$(relative_path "$cfg")"
+  relative_tla="$(relative_path "$tla")"
+  display_command="$(command_string tlc -config "$relative_cfg" "$relative_tla")"
   JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "TLA TLC" "$REPO_ROOT" java -jar "$jar" -config "$cfg" "$tla"
+    collect_step "TLA TLC" "$REPO_ROOT" tlc -config "$relative_cfg" "$relative_tla"
 }
 
 check_alloy_model() {
-  local jar="$1"
-  local file="$2"
+  local file="$1"
   local display_command
+  local relative_file
 
-  display_command="$(command_string java -jar "$(relative_path "$jar")" commands "$(relative_path "$file")")"
+  require_tool_command alloy alloy
+  relative_file="$(relative_path "$file")"
+  display_command="$(command_string alloy commands "$relative_file")"
   JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "Alloy" "$REPO_ROOT" java -jar "$jar" commands "$file"
+    collect_step "Alloy" "$REPO_ROOT" alloy commands "$relative_file"
 }
 
 collect_default_specs() {
@@ -201,8 +209,6 @@ check_openapi_spec() {
 
 check_specs() {
   local path
-  local tla_jar
-  local alloy_jar
   local file
   local saw_file=0
 
@@ -219,30 +225,22 @@ check_specs() {
     return
   fi
 
-  if [[ "${#CHECK_FILES[@]}" -gt 0 ]]; then
-    tla_jar="$(tool_jar tla)"
-    alloy_jar="$(tool_jar alloy)"
-  fi
-
   while IFS= read -r file; do
     saw_file=1
 
     case "$file" in
     *.tla)
-      require_jar "$tla_jar" "tla"
-      check_tla_module "$tla_jar" "$file"
+      check_tla_module "$file"
 
       if [[ -f "${file%.tla}.cfg" ]]; then
-        check_tla_model "$tla_jar" "${file%.tla}.cfg"
+        check_tla_model "${file%.tla}.cfg"
       fi
       ;;
     *.cfg)
-      require_jar "$tla_jar" "tla"
-      check_tla_model "$tla_jar" "$file"
+      check_tla_model "$file"
       ;;
     *.als)
-      require_jar "$alloy_jar" "alloy"
-      check_alloy_model "$alloy_jar" "$file"
+      check_alloy_model "$file"
       ;;
     esac
   done < <(unique_files)

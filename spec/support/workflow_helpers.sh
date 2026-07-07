@@ -271,6 +271,7 @@ new_fixture() {
   mkdir -p \
     "$fake_bin" \
     "$fixture/.vscode" \
+    "$fixture/docs/specs" \
     "$fixture/apps/api/assets/css" \
     "$fixture/apps/api/lib" \
     "$fixture/apps/workspace/src" \
@@ -287,10 +288,6 @@ apps:
     path: apps/workspace
   website:
     path: apps/website
-
-tools:
-  tla: "1.8.0"
-  alloy: "6.2.0"
 YAML
 
   printf "{}\n" >"$fixture/package.json"
@@ -412,6 +409,36 @@ printf "\n" >> "$JUST_FAKE_LOG"
 exit "${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}"
 '
 
+  # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/sany" '
+printf "sany\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+exit "${JUST_FAKE_SANY_STATUS:-0}"
+'
+
+  # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/tlc" '
+printf "tlc\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+exit "${JUST_FAKE_TLC_STATUS:-0}"
+'
+
+  # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/alloy" '
+printf "alloy\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+exit "${JUST_FAKE_ALLOY_STATUS:-0}"
+'
+
   : >"$fixture/fake.log"
   printf "%s\n" "$fixture"
 }
@@ -437,6 +464,7 @@ run_wrapper() {
         JUST_CONFIG="$fixture/just.yaml" \
         JUST_CALLER_DIR="$caller" \
         JUST_FAKE_LOG="$fixture/fake.log" \
+        JUST_FAKE_ALLOY_STATUS="${JUST_FAKE_ALLOY_STATUS:-0}" \
         JUST_FAKE_MIX_FORMAT_CHECK_STATUS="${JUST_FAKE_MIX_FORMAT_CHECK_STATUS:-0}" \
         JUST_FAKE_MIX_SOBELOW_STATUS="${JUST_FAKE_MIX_SOBELOW_STATUS:-0}" \
         JUST_FAKE_PNPM_FAIL_OXFMT="${JUST_FAKE_PNPM_FAIL_OXFMT:-0}" \
@@ -444,6 +472,8 @@ run_wrapper() {
         JUST_FAKE_PNPM_FAIL_STYLELINT="${JUST_FAKE_PNPM_FAIL_STYLELINT:-0}" \
         JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL="${JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL:-0}" \
         JUST_FAKE_PROCESS_COMPOSE_STATUS="${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}" \
+        JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
+        JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
   ) >"$__captured_output" 2>&1
   __captured_status="$?"
@@ -635,6 +665,66 @@ test_format_check_aggregates_formatter_failures() {
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted mix.exs || return
 }
 
+test_check_specs_uses_asdf_shims() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  cat >"$fixture/docs/specs/Example.tla" <<'TLA'
+---- MODULE Example ----
+VARIABLE x
+Init == x = 0
+Next == x' = x
+====
+TLA
+  printf "INIT Init\nNEXT Next\n" >"$fixture/docs/specs/Example.cfg"
+  printf "sig Example {}\nrun {} for 1\n" >"$fixture/docs/specs/Structure.als"
+
+  run_wrapper status output "$fixture" "$fixture" check specs docs/specs
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "cmd: sany docs/specs/Example.tla" || return
+  assert_output_contains "$output" "cmd: tlc -config docs/specs/Example.cfg docs/specs/Example.tla" || return
+  assert_output_contains "$output" "cmd: alloy commands docs/specs/Structure.als" || return
+  assert_log_entry "$fixture" sany "$fixture" docs/specs/Example.tla || return
+  assert_log_entry "$fixture" tlc "$fixture" -config docs/specs/Example.cfg docs/specs/Example.tla || return
+  assert_log_entry "$fixture" alloy "$fixture" commands docs/specs/Structure.als || return
+}
+
+test_install_runs_project_dependency_installs() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" install
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[ok] Install Elixir Deps" || return
+  assert_output_contains "$output" "[ok] Install Node Deps" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" deps.get || return
+  assert_log_entry "$fixture" pnpm "$fixture" --config.confirmModulesPurge=false install || return
+}
+
+test_install_npm_dep_uses_direct_selector() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" install npm:lucide-react 0.475.0 --app workspace
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[ok] Install npm Dependency" || return
+  assert_output_contains "$output" "app: workspace" || return
+  assert_output_contains "$output" "package: npm:lucide-react" || return
+  assert_output_contains "$output" "version: 0.475.0" || return
+  assert_log_entry "$fixture" pnpm "$fixture" --config.confirmModulesPurge=false --filter ./apps/workspace add lucide-react@0.475.0 || return
+}
+
 test_install_hex_dep_uses_temp_mix_exs_and_compact_summary() {
   local fixture
   local output
@@ -646,7 +736,7 @@ test_install_hex_dep_uses_temp_mix_exs_and_compact_summary() {
   mix_exs="$fixture/apps/api/mix.exs"
   expected_log="$(mktemp "$fixture/expected.log.XXXXXX")"
 
-  run_wrapper status output "$fixture" "$fixture" install deps hex:uniq 0.6.3 --app api
+  run_wrapper status output "$fixture" "$fixture" install hex:uniq 0.6.3 --app api
 
   assert_status 0 "$status" "$output" || return
   assert_file_contains "$mix_exs" "{:uniq, \"0.6.3\"}" || return
@@ -676,7 +766,7 @@ test_remove_hex_dep_uses_temp_mix_exs_and_leaves_parsable_elixir() {
   expected_log="$(mktemp "$fixture/expected.log.XXXXXX")"
   write_mix_exs "$mix_exs" 1
 
-  run_wrapper status output "$fixture" "$fixture" remove deps hex:uniq --app api
+  run_wrapper status output "$fixture" "$fixture" remove hex:uniq --app api
 
   assert_status 0 "$status" "$output" || return
   assert_file_not_contains "$mix_exs" ":uniq" || return
