@@ -313,6 +313,43 @@ path_is_under_repo_root() {
   [[ "$path" == "$REPO_ROOT" || "$path" == "$REPO_ROOT/"* ]]
 }
 
+path_is_under_docs() {
+  local relative
+
+  relative="$(relative_path "$1")"
+  [[ "$relative" == "docs" || "$relative" == docs/* ]]
+}
+
+just_is_openapi_file() {
+  local file="$1"
+
+  grep -Eq '(^[[:space:]]*(openapi|swagger)[[:space:]]*:)|("[[:space:]]*(openapi|swagger)[[:space:]]*"[[:space:]]*:)' "$file"
+}
+
+just_is_spec_file() {
+  local file="$1"
+
+  case "$file" in
+  *.tla | *.cfg | *.als)
+    return 0
+    ;;
+  *.json | *.yaml | *.yml)
+    just_is_openapi_file "$file"
+    return
+    ;;
+  esac
+
+  return 1
+}
+
+spec_placement_violation() {
+  local file="$1"
+
+  just_is_spec_file "$file" || return 1
+  path_is_under_docs "$file" && return 1
+  return 0
+}
+
 git_worktree_available() {
   git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
 }

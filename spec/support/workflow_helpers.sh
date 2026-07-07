@@ -339,6 +339,7 @@ YAML
   printf "processes: {}\n" >"$fixture/process-compose.yaml"
   printf "{}\n" >"$fixture/.oxfmtrc.json"
   printf "line-length = 88\n" >"$fixture/ruff.toml"
+  printf "fake tla2tools jar\n" >"$fixture/tla2tools.jar"
   printf "root = true\n" >"$fixture/.editorconfig"
   printf "{}\n" >"$fixture/.vscode/settings.json"
   printf "default:\n" >"$fixture/Justfile"
@@ -464,6 +465,35 @@ exit 0
 '
 
   # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/pyrefly" '
+printf "pyrefly\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+exit "${JUST_FAKE_PYREFLY_STATUS:-0}"
+'
+
+  # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/java" '
+printf "java\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+
+if [[ "${JUST_FAKE_JAVA_STATUS:-0}" != "0" ]]; then
+  exit "$JUST_FAKE_JAVA_STATUS"
+fi
+
+if [[ "${1:-}" == "-cp" && "${3:-}" == "formatter.Main" && "$#" -ge 5 ]]; then
+  cp "$4" "$5"
+fi
+
+exit 0
+'
+
+  # shellcheck disable=SC2016
   write_fake_command "$fake_bin/process-compose" '
 printf "process-compose\t%s" "$PWD" >> "$JUST_FAKE_LOG"
 for arg in "$@"; do
@@ -533,6 +563,7 @@ run_wrapper() {
         JUST_CALLER_DIR="$caller" \
         JUST_FAKE_LOG="$fixture/fake.log" \
         JUST_FAKE_ALLOY_STATUS="${JUST_FAKE_ALLOY_STATUS:-0}" \
+        JUST_FAKE_JAVA_STATUS="${JUST_FAKE_JAVA_STATUS:-0}" \
         JUST_FAKE_MIX_FORMAT_CHECK_STATUS="${JUST_FAKE_MIX_FORMAT_CHECK_STATUS:-0}" \
         JUST_FAKE_MIX_SOBELOW_STATUS="${JUST_FAKE_MIX_SOBELOW_STATUS:-0}" \
         JUST_FAKE_PNPM_FAIL_OXFMT="${JUST_FAKE_PNPM_FAIL_OXFMT:-0}" \
@@ -540,10 +571,12 @@ run_wrapper() {
         JUST_FAKE_PNPM_FAIL_STYLELINT="${JUST_FAKE_PNPM_FAIL_STYLELINT:-0}" \
         JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL="${JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL:-0}" \
         JUST_FAKE_PROCESS_COMPOSE_STATUS="${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}" \
+        JUST_FAKE_PYREFLY_STATUS="${JUST_FAKE_PYREFLY_STATUS:-0}" \
         JUST_FAKE_RUFF_FORMAT_STATUS="${JUST_FAKE_RUFF_FORMAT_STATUS:-0}" \
         JUST_FAKE_RUFF_CHECK_STATUS="${JUST_FAKE_RUFF_CHECK_STATUS:-0}" \
         JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
         JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
+        TLA2TOOLS_JAR="$fixture/tla2tools.jar" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
   ) >"$__captured_output" 2>&1
   __captured_status="$?"
@@ -697,6 +730,39 @@ test_path_selected_python_uses_ruff_config() {
   assert_log_entry "$fixture" ruff "$fixture" format --check scripts/foo.py || return
 }
 
+test_path_selected_tla_uses_tla_formatter() {
+  local fixture
+  local java_prefix
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf -- "---- MODULE Example ----\n====\n" >"$fixture/docs/specs/Example.tla"
+
+  run_wrapper status output "$fixture" "$fixture" format docs/specs/Example.tla
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured TLA+ formatter: tla2tools.jar" || return
+  assert_output_contains "$output" "[info] [java -cp tla2tools.jar formatter.Main docs/specs/Example.tla docs/specs/Example.tla] [tla2tools.jar] docs/specs/Example.tla" || return
+  java_prefix="$(printf "java\t%s\t-cp\t%s\tformatter.Main\t%s\t" "$fixture" "$fixture/tla2tools.jar" "$fixture/docs/specs/Example.tla")"
+  assert_file_contains "$fixture/fake.log" "$java_prefix" || return
+}
+
+test_tla_format_check_fails_clearly() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf -- "---- MODULE Example ----\n====\n" >"$fixture/docs/specs/Example.tla"
+
+  run_wrapper status output "$fixture" "$fixture" format --check docs/specs/Example.tla
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: TLA+ formatter does not support check mode; run 'just format docs/specs/Example.tla'" || return
+  assert_log_not_contains "$fixture" "java" || return
+}
+
 test_path_selected_python_without_config_skips_ruff() {
   local fixture
   local output
@@ -785,6 +851,24 @@ test_default_lint_summary_uses_repo_defaults() {
   assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
   assert_log_not_contains "$fixture" ".just/" || return
+}
+
+test_lint_enforces_spec_placement() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf -- "---- MODULE Misplaced ----\n====\n" >"$fixture/scripts/Misplaced.tla"
+  printf "openapi: 3.1.0\ninfo:\n  title: Misplaced\n  version: 1.0.0\npaths: {}\n" >"$fixture/openapi.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" lint
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured spec placement: docs/" || return
+  assert_output_contains "$output" "Spec files must live under docs/: scripts/Misplaced.tla" || return
+  assert_output_contains "$output" "Spec files must live under docs/: openapi.yaml" || return
+  assert_output_contains "$output" "[error] [check specs live under docs/] [docs/] ." || return
 }
 
 test_lint_selected_python_uses_ruff_config() {
@@ -1047,11 +1131,30 @@ test_check_types_uses_compact_summary() {
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "[info] configured typecheck: apps/workspace/package.json" || return
   assert_output_contains "$output" "[info] configured typecheck: apps/website/package.json" || return
+  assert_output_contains "$output" "[info] configured pyrefly: auto" || return
   assert_output_contains "$output" "[info] [pnpm run typecheck] [apps/workspace/package.json] apps/workspace" || return
   assert_output_contains "$output" "[info] [pnpm run typecheck] [apps/website/package.json] apps/website" || return
+  assert_output_contains "$output" "[info] [pyrefly check] [auto] ." || return
   assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run typecheck || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/website" run typecheck || return
+  assert_log_entry "$fixture" pyrefly "$fixture" check || return
+}
+
+test_check_types_runs_pyrefly_for_selected_python() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" check types scripts/foo.py
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured pyrefly: auto" || return
+  assert_output_contains "$output" "[info] [pyrefly check scripts/foo.py] [auto] scripts/foo.py" || return
+  assert_log_entry "$fixture" pyrefly "$fixture" check scripts/foo.py || return
+  assert_log_not_contains "$fixture" $'run\ttypecheck' || return
 }
 
 test_check_knip_uses_compact_summary() {

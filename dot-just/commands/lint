@@ -8,6 +8,7 @@ trap - EXIT
 declare -a OXLINT_PATHS=()
 declare -a RUFF_LINT_PATHS=()
 declare -a STYLELINT_PATHS=()
+declare -a SPEC_PLACEMENT_PATHS=()
 declare -a LINT_SELECTORS=()
 declare -a MIX_LINT_ROOTS=()
 declare -a LINT_CONFIG_LEVELS=()
@@ -20,6 +21,7 @@ declare -a LINT_OPERATION_TARGETS=()
 RUN_DEFAULT_OXLINT=0
 RUN_DEFAULT_RUFF=0
 RUN_DEFAULT_STYLELINT=0
+RUN_SPEC_PLACEMENT=0
 
 oxlint_config() {
   local config
@@ -108,6 +110,7 @@ add_default_lint_targets() {
   RUN_DEFAULT_OXLINT=1
   RUN_DEFAULT_RUFF=1
   RUN_DEFAULT_STYLELINT=1
+  RUN_SPEC_PLACEMENT=1
 
   while read -r _app root; do
     add_mix_lint_root "$root"
@@ -158,6 +161,12 @@ add_ruff_lint_path() {
   RUFF_LINT_PATHS+=("$(lint_tool_path "$path")")
 }
 
+add_spec_placement_path() {
+  local path="$1"
+
+  SPEC_PLACEMENT_PATHS+=("$path")
+}
+
 has_mix_lint_files() {
   local path="$1"
   local file
@@ -176,6 +185,10 @@ has_mix_lint_files() {
 add_lint_file() {
   local file="$1"
   local root
+
+  if just_is_spec_file "$file"; then
+    add_spec_placement_path "$file"
+  fi
 
   case "$file" in
   *.ex | *.exs | *.heex)
@@ -253,6 +266,12 @@ unique_stylelint_paths() {
   [[ "${#STYLELINT_PATHS[@]}" -gt 0 ]] || return 0
 
   printf "%s\n" "${STYLELINT_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_spec_placement_paths() {
+  [[ "${#SPEC_PLACEMENT_PATHS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${SPEC_PLACEMENT_PATHS[@]}" | awk 'NF && !seen[$0]++'
 }
 
 unique_mix_lint_roots() {
@@ -485,7 +504,16 @@ record_mix_lint_config_report() {
   done < <(unique_mix_lint_roots)
 }
 
+record_spec_placement_config_report() {
+  if [[ "$RUN_SPEC_PLACEMENT" -eq 0 && "${#SPEC_PLACEMENT_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  record_lint_config "info" "configured spec placement: docs/"
+}
+
 record_lint_config_report() {
+  record_spec_placement_config_report
   record_oxlint_config_report
   record_ruff_config_report
   record_stylelint_config_report
@@ -512,6 +540,57 @@ preflight_step() {
   fi
 
   record_lint_operation "$level" "" "check $label" "$config" "$requirement"
+}
+
+check_spec_placement() {
+  local path
+  local file
+  local status=0
+
+  if [[ "$#" -eq 0 ]]; then
+    set -- "$REPO_ROOT"
+  fi
+
+  for path in "$@"; do
+    if [[ -f "$path" ]]; then
+      if spec_placement_violation "$path"; then
+        printf "Spec files must live under docs/: %s\n" "$(relative_path "$path")" >&2
+        status=1
+      fi
+      continue
+    fi
+
+    if [[ -d "$path" ]]; then
+      while IFS= read -r -d '' file; do
+        if spec_placement_violation "$file"; then
+          printf "Spec files must live under docs/: %s\n" "$(relative_path "$file")" >&2
+          status=1
+        fi
+      done < <(discover_project_files "$path")
+    fi
+  done
+
+  return "$status"
+}
+
+run_spec_placement() {
+  local path
+  local display_command="check specs live under docs/"
+  local target="."
+  local -a paths=()
+
+  if [[ "$RUN_SPEC_PLACEMENT" -eq 1 ]]; then
+    collect_lint_step "Spec Placement" "$REPO_ROOT" "$display_command" "docs/" "$target" check_spec_placement
+  fi
+
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(unique_spec_placement_paths)
+
+  [[ "${#paths[@]}" -gt 0 ]] || return 0
+
+  target="$(printf "%s\n" "${paths[@]}" | while IFS= read -r path; do relative_path "$path"; done | paste -sd ' ' -)"
+  collect_lint_step "Spec Placement" "$REPO_ROOT" "$display_command" "docs/" "$target" check_spec_placement "${paths[@]}"
 }
 
 run_oxlint() {
@@ -773,12 +852,13 @@ main() {
     add_default_lint_targets
   fi
 
-  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_RUFF" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_RUFF" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "$RUN_SPEC_PLACEMENT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#SPEC_PLACEMENT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
     printf "No lint-compatible files selected.\n"
     return
   fi
 
   record_lint_config_report
+  run_spec_placement
   run_mix_lint
   run_oxlint
   run_ruff_lint

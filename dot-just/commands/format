@@ -7,6 +7,7 @@ trap - EXIT
 
 declare -a OXFMT_PATHS=()
 declare -a RUFF_PATHS=()
+declare -a TLA_FORMAT_FILES=()
 declare -a MIX_FORMAT_INPUTS=()
 declare -a MIX_FORMAT_ROOTS=()
 declare -a FORMAT_SELECTORS=()
@@ -125,6 +126,7 @@ add_format_path() {
 add_default_format_targets() {
   add_default_oxfmt_target
   add_default_ruff_target
+  add_default_tla_format_targets
 
   while read -r _ path; do
     add_mix_format_root "$path"
@@ -147,12 +149,38 @@ add_ruff_path() {
   RUFF_PATHS+=("$(relative_path "$path")")
 }
 
+add_default_tla_format_targets() {
+  local file
+
+  [[ -d "$REPO_ROOT/docs" ]] || return 0
+
+  while IFS= read -r -d '' file; do
+    case "$file" in
+    *.tla)
+      add_tla_format_file "$file"
+      ;;
+    esac
+  done < <(discover_project_files "$REPO_ROOT/docs")
+}
+
+add_tla_format_file() {
+  local file="$1"
+
+  path_is_under_docs "$file" ||
+    die "spec files must live under docs/: $(relative_path "$file")"
+
+  TLA_FORMAT_FILES+=("$(relative_path "$file")")
+}
+
 add_non_elixir_format_file() {
   local file="$1"
 
   case "$file" in
   *.py | *.pyi)
     add_ruff_path "$file"
+    ;;
+  *.tla)
+    add_tla_format_file "$file"
     ;;
   *)
     add_oxfmt_path "$file"
@@ -173,6 +201,9 @@ add_non_elixir_format_path() {
     case "$file" in
     *.py | *.pyi)
       add_ruff_path "$file"
+      ;;
+    *.tla)
+      add_tla_format_file "$file"
       ;;
     esac
   done < <(discover_project_files "$path")
@@ -264,6 +295,12 @@ unique_ruff_paths() {
   [[ "${#RUFF_PATHS[@]}" -gt 0 ]] || return 0
 
   printf "%s\n" "${RUFF_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_tla_format_files() {
+  [[ "${#TLA_FORMAT_FILES[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${TLA_FORMAT_FILES[@]}" | awk 'NF && !seen[$0]++'
 }
 
 unique_mix_inputs() {
@@ -459,9 +496,72 @@ record_mix_config_report() {
   done < <(printf "%s\n" "${roots[@]}" | awk 'NF && !seen[$0]++')
 }
 
+tla2tools_jar() {
+  local asdf_root
+  local candidate
+  local tlc_path
+
+  if [[ -n "${TLA2TOOLS_JAR:-}" ]]; then
+    [[ -f "$TLA2TOOLS_JAR" ]] || return 1
+    printf "%s\n" "$TLA2TOOLS_JAR"
+    return 0
+  fi
+
+  if command -v asdf >/dev/null 2>&1; then
+    if asdf_root="$(asdf where tlaplus 2>/dev/null)" && [[ -f "$asdf_root/lib/tla2tools.jar" ]]; then
+      printf "%s\n" "$asdf_root/lib/tla2tools.jar"
+      return 0
+    fi
+
+    if tlc_path="$(asdf which tlc 2>/dev/null)"; then
+      candidate="$(cd -- "$(dirname -- "$tlc_path")/.." && pwd)/lib/tla2tools.jar"
+      if [[ -f "$candidate" ]]; then
+        printf "%s\n" "$candidate"
+        return 0
+      fi
+    fi
+  fi
+
+  if command -v tlc >/dev/null 2>&1; then
+    tlc_path="$(command -v tlc)"
+    candidate="$(cd -- "$(dirname -- "$tlc_path")/.." && pwd)/lib/tla2tools.jar"
+    if [[ -f "$candidate" ]]; then
+      printf "%s\n" "$candidate"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+tla_formatter_config_display() {
+  local jar="$1"
+
+  if [[ "$jar" == "$REPO_ROOT/"* ]]; then
+    relative_path "$jar"
+  else
+    printf "tla2tools.jar"
+  fi
+}
+
+record_tla_config_report() {
+  local jar
+
+  if [[ "${#TLA_FORMAT_FILES[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if jar="$(tla2tools_jar)"; then
+    record_format_config "info" "configured TLA+ formatter: $(tla_formatter_config_display "$jar")"
+  else
+    record_format_config "warning" "unconfigured TLA+ formatter: cannot find tla2tools.jar"
+  fi
+}
+
 record_format_config_report() {
   record_oxfmt_config_report
   record_ruff_config_report
+  record_tla_config_report
   record_mix_config_report
 }
 
@@ -664,6 +764,57 @@ run_ruff() {
   fi
 }
 
+format_tla_file() {
+  local jar="$1"
+  local relative_file="$2"
+  local file="$REPO_ROOT/$relative_file"
+  local tmp
+  local status
+
+  tmp="$(mktemp "$(dirname -- "$file")/.tla-format.XXXXXX")"
+
+  if java -cp "$jar" formatter.Main "$file" "$tmp"; then
+    mv "$tmp" "$file"
+    return 0
+  fi
+
+  status="$?"
+  rm -f "$tmp"
+  return "$status"
+}
+
+run_tla_format() {
+  local check="$1"
+  local file
+  local jar
+  local display_command
+  local config
+  local target
+  local -a files=()
+
+  while IFS= read -r file; do
+    files+=("$file")
+  done < <(unique_tla_format_files)
+
+  [[ "${#files[@]}" -gt 0 ]] || return 0
+
+  target="$(format_paths_summary "${files[@]}")"
+
+  if [[ "$check" -eq 1 ]]; then
+    die "TLA+ formatter does not support check mode; run 'just format $target'"
+  fi
+
+  require_command java
+  jar="$(tla2tools_jar)" ||
+    die "cannot find tla2tools.jar; set TLA2TOOLS_JAR or install the tlaplus asdf tool"
+  config="$(tla_formatter_config_display "$jar")"
+
+  for file in "${files[@]}"; do
+    display_command="$(command_string java -cp "$config" formatter.Main "$file" "$file")"
+    collect_format_step "TLA Format" "$REPO_ROOT" "$display_command" "$config" "$file" format_tla_file "$jar" "$file"
+  done
+}
+
 run_mix_format() {
   local check="$1"
   local input
@@ -783,7 +934,7 @@ main() {
     add_default_format_targets
   fi
 
-  if [[ "$SELECT_DEFAULT_OXFMT" -eq 0 && "$SELECT_DEFAULT_RUFF" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 && "${#RUFF_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
+  if [[ "$SELECT_DEFAULT_OXFMT" -eq 0 && "$SELECT_DEFAULT_RUFF" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 && "${#RUFF_PATHS[@]}" -eq 0 && "${#TLA_FORMAT_FILES[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
     printf "No formatter-compatible files selected.\n"
     return
   fi
@@ -791,6 +942,7 @@ main() {
   record_format_config_report
   run_oxfmt "$check"
   run_ruff "$check"
+  run_tla_format "$check"
   run_mix_format "$check"
   print_format_summary
 

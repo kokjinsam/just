@@ -8,6 +8,7 @@ trap - EXIT
 declare -a CHECK_FILES=()
 declare -a OPENAPI_FILES=()
 declare -a TYPECHECK_ROOTS=()
+declare -a PYREFLY_PATHS=()
 declare -a CHECK_CONFIG_LEVELS=()
 declare -a CHECK_CONFIG_MESSAGES=()
 declare -a CHECK_OPERATION_LEVELS=()
@@ -15,6 +16,7 @@ declare -a CHECK_OPERATION_PREFIXES=()
 declare -a CHECK_OPERATION_COMMANDS=()
 declare -a CHECK_OPERATION_CONFIGS=()
 declare -a CHECK_OPERATION_TARGETS=()
+RUN_DEFAULT_PYREFLY=0
 
 add_file() {
   local file="$1"
@@ -111,12 +113,68 @@ add_typecheck_root() {
   fi
 }
 
+add_pyrefly_path() {
+  local path="$1"
+
+  PYREFLY_PATHS+=("$(relative_path "$path")")
+}
+
+has_python_files() {
+  local path="$1"
+  local file
+
+  while IFS= read -r -d '' file; do
+    case "$file" in
+    *.py | *.pyi)
+      return 0
+      ;;
+    esac
+  done < <(discover_project_files "$path")
+
+  return 1
+}
+
+collect_python_path() {
+  local path="$1"
+  local file
+  local matched=0
+
+  if [[ -f "$path" ]]; then
+    case "$path" in
+    *.py | *.pyi)
+      add_pyrefly_path "$path"
+      return 0
+      ;;
+    esac
+
+    return 1
+  fi
+
+  if [[ -d "$path" ]]; then
+    while IFS= read -r -d '' file; do
+      case "$file" in
+      *.py | *.pyi)
+        matched=1
+        ;;
+      esac
+    done < <(discover_project_files "$path")
+
+    if [[ "$matched" -eq 1 ]]; then
+      add_pyrefly_path "$path"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 collect_type_path() {
   local selector="$1"
   local path
   local app
   local root
-  local matched=0
+  local matched_node=0
+  local matched_python=0
 
   path="$(resolve_path "$selector")"
 
@@ -126,18 +184,27 @@ collect_type_path() {
     while read -r _app root; do
       add_typecheck_root "$root"
     done < <(node_apps)
+
+    if has_python_files "$REPO_ROOT"; then
+      RUN_DEFAULT_PYREFLY=1
+    fi
+
     return
   fi
 
   while read -r app root; do
     if [[ "$path" == "$root" || "$path" == "$root/"* ]]; then
-      matched=1
+      matched_node=1
       add_typecheck_root "$root"
     fi
   done < <(node_apps)
 
-  if [[ "$matched" -eq 0 ]]; then
-    printf "No TypeScript app matched %s\n" "$(relative_path "$path")" >&2
+  if collect_python_path "$path"; then
+    matched_python=1
+  fi
+
+  if [[ "$matched_node" -eq 0 && "$matched_python" -eq 0 ]]; then
+    printf "No typecheck target matched %s\n" "$(relative_path "$path")" >&2
   fi
 }
 
@@ -146,6 +213,14 @@ unique_typecheck_roots() {
 
   printf "%s\n" "${TYPECHECK_ROOTS[@]}" | awk '!seen[$0]++' | while IFS= read -r root; do
     [[ -n "$root" ]] && printf "%s\n" "$root"
+  done
+}
+
+unique_pyrefly_paths() {
+  local path
+
+  printf "%s\n" "${PYREFLY_PATHS[@]}" | awk '!seen[$0]++' | while IFS= read -r path; do
+    [[ -n "$path" ]] && printf "%s\n" "$path"
   done
 }
 
@@ -204,6 +279,16 @@ collect_check_step() {
   fi
 
   record_check_operation "$level" "" "$display_command" "$config" "$target"
+}
+
+pyrefly_config_display() {
+  if [[ -f "$REPO_ROOT/pyrefly.toml" ]]; then
+    printf "pyrefly.toml"
+  elif [[ -f "$REPO_ROOT/pyproject.toml" ]] && grep -Eq '^[[:space:]]*\[tool\.pyrefly([.]|])' "$REPO_ROOT/pyproject.toml"; then
+    printf "pyproject.toml"
+  else
+    printf "auto"
+  fi
 }
 
 print_check_summary() {
@@ -373,12 +458,20 @@ check_specs() {
 check_types() {
   local path
   local root
+  local pyrefly_config
+  local pyrefly_target
   local saw_root=0
+  local saw_pyrefly=0
+  local -a pyrefly_paths=()
 
   if [[ "$#" -eq 0 ]]; then
     while read -r _app root; do
       add_typecheck_root "$root"
     done < <(node_apps)
+
+    if has_python_files "$REPO_ROOT"; then
+      RUN_DEFAULT_PYREFLY=1
+    fi
   else
     for path in "$@"; do
       collect_type_path "$path"
@@ -391,11 +484,30 @@ check_types() {
     collect_check_step "Typecheck" "$root" "pnpm run typecheck" "$(relative_path "$root/package.json")" "$(relative_path "$root")" pnpm run typecheck
   done < <(unique_typecheck_roots)
 
-  if [[ "$saw_root" -eq 1 ]]; then
+  if [[ "$RUN_DEFAULT_PYREFLY" -eq 1 ]]; then
+    saw_pyrefly=1
+    pyrefly_config="$(pyrefly_config_display)"
+    record_check_config "info" "configured pyrefly: $pyrefly_config"
+    collect_check_step "Pyrefly" "$REPO_ROOT" "pyrefly check" "$pyrefly_config" "." pyrefly check
+  fi
+
+  while IFS= read -r path; do
+    pyrefly_paths+=("$path")
+  done < <(unique_pyrefly_paths)
+
+  if [[ "${#pyrefly_paths[@]}" -gt 0 ]]; then
+    saw_pyrefly=1
+    pyrefly_config="$(pyrefly_config_display)"
+    pyrefly_target="$(printf "%s\n" "${pyrefly_paths[@]}" | paste -sd ' ' -)"
+    record_check_config "info" "configured pyrefly: $pyrefly_config"
+    collect_check_step "Pyrefly" "$REPO_ROOT" "$(command_string pyrefly check "${pyrefly_paths[@]}")" "$pyrefly_config" "$pyrefly_target" pyrefly check "${pyrefly_paths[@]}"
+  fi
+
+  if [[ "$saw_root" -eq 1 || "$saw_pyrefly" -eq 1 ]]; then
     print_check_summary
     fail_if_steps_failed
   else
-    printf "No TypeScript checks selected.\n"
+    printf "No type checks selected.\n"
   fi
 }
 

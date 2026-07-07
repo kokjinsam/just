@@ -26,7 +26,7 @@ Update:
 
 Check:
   just check specs [PATH...]           Check TLA+, Alloy, and OpenAPI specs
-  just check types [PATH...]           Typecheck TypeScript apps under paths
+  just check types [PATH...]           Typecheck TypeScript apps and Python paths
   just check knip                      Check unused files, dependencies, and exports
 
 Test:
@@ -44,9 +44,9 @@ Dev:
   just dev --dry-run                   Validate process-compose.yaml without starting servers
 
 Lint:
-  just lint [PATH...]                  Lint configured Elixir, JS, TS, CSS, and Python paths
+  just lint [PATH...]                  Lint code paths and enforce spec placement
 
 Format:
-  just format [PATH...]                Format configured JS, CSS, Python, and Elixir paths
+  just format [PATH...]                Format configured JS, CSS, Python, Elixir, and TLA+ paths
   just format --check [PATH...]        Check configured JS, CSS, Python, and Elixir paths
 EOF

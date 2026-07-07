@@ -36,6 +36,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "formats selected TLA+ files with tla2tools formatter"
+    When call test_path_selected_tla_uses_tla_formatter
+    The status should equal 0
+  End
+
+  It "fails clearly for TLA+ format check mode"
+    When call test_tla_format_check_fails_clearly
+    The status should equal 0
+  End
+
   It "skips selected Python paths when Ruff config is missing"
     When call test_path_selected_python_without_config_skips_ruff
     The status should equal 0
@@ -53,6 +63,11 @@ Describe "workflow scripts"
 
   It "reports repo defaults for default lint"
     When call test_default_lint_summary_uses_repo_defaults
+    The status should equal 0
+  End
+
+  It "enforces spec placement during lint"
+    When call test_lint_enforces_spec_placement
     The status should equal 0
   End
 
@@ -123,6 +138,11 @@ Describe "workflow scripts"
 
   It "checks TypeScript apps with compact summary"
     When call test_check_types_uses_compact_summary
+    The status should equal 0
+  End
+
+  It "checks selected Python paths with Pyrefly"
+    When call test_check_types_runs_pyrefly_for_selected_python
     The status should equal 0
   End
 
