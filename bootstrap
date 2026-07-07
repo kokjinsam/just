@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ref="${KOKJINSAM_JUST_REF:-main}"
+base_url="${KOKJINSAM_JUST_BASE_URL:-https://raw.githubusercontent.com/kokjinsam/just/$ref}"
+target_root="${KOKJINSAM_JUST_TARGET:-$(pwd)}"
+tmp_base="${TMPDIR:-/tmp}"
+tmp_base="${tmp_base%/}"
+tmp_dir="$(mktemp -d "$tmp_base/kokjinsam-just.XXXXXX")"
+
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+
+trap cleanup EXIT
+
+die() {
+  printf "error: %s\n" "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+download() {
+  local source="$1"
+  local destination="$2"
+
+  mkdir -p "$(dirname -- "$destination")"
+  curl -fsSL --retry 3 --retry-delay 1 -o "$destination" "$source"
+}
+
+install_file() {
+  local source="$1"
+  local destination="$2"
+
+  mkdir -p "$(dirname -- "$destination")"
+  rm -f "$destination"
+  cp "$source" "$destination"
+}
+
+download_dot_just_file() {
+  local path="$1"
+
+  download "$base_url/dot-just/$path" "$tmp_dir/.just/$path"
+}
+
+require_command curl
+
+download "$base_url/kokjinsam.just" "$tmp_dir/.just/kokjinsam.just"
+
+for file in \
+  bin/workflow \
+  commands/build \
+  commands/check \
+  commands/dev \
+  commands/format \
+  commands/help \
+  commands/install \
+  commands/lint \
+  commands/migrate \
+  commands/remove \
+  commands/reset \
+  commands/test \
+  lib/install_hex_dep.exs \
+  lib/lib.sh \
+  lib/remove_hex_dep.exs; do
+  download_dot_just_file "$file"
+done
+
+install_file "$tmp_dir/.just/kokjinsam.just" "$target_root/.just/kokjinsam.just"
+
+for file in \
+  bin/workflow \
+  commands/build \
+  commands/check \
+  commands/dev \
+  commands/format \
+  commands/help \
+  commands/install \
+  commands/lint \
+  commands/migrate \
+  commands/remove \
+  commands/reset \
+  commands/test \
+  lib/install_hex_dep.exs \
+  lib/lib.sh \
+  lib/remove_hex_dep.exs; do
+  install_file "$tmp_dir/.just/$file" "$target_root/.just/$file"
+done
+
+rm -f "$target_root/.just/tests/check_scripts"
+rmdir "$target_root/.just/tests" 2>/dev/null || true
+
+for file in \
+  bin/workflow \
+  commands/dev \
+  commands/migrate \
+  commands/reset \
+  lib/install_hex_dep.exs \
+  lib/remove_hex_dep.exs; do
+  chmod +x "$target_root/.just/$file"
+done
+
+printf "Installed Kok Jin Sam's just workflow into %s/.just\n" "$target_root"
+printf "Import it from your Justfile with: import? '.just/kokjinsam.just'\n"

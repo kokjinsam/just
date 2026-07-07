@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+JUST_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+command="${1:-help}"
+
+if [[ "$#" -gt 0 ]]; then
+  shift
+fi
+
+case "$command" in
+help | install | remove | check | dev | lint | migrate | format | reset | test | build)
+  exec bash "$JUST_ROOT/commands/$command" "$@"
+  ;;
+*)
+  printf "error: unknown command: %s\n" "$command" >&2
+  exec bash "$JUST_ROOT/commands/help"
+  ;;
+esac

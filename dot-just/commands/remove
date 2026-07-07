@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+remove_node_deps() {
+  local app
+  local root
+  local saw_root=0
+
+  if [[ -d "$REPO_ROOT/node_modules" ]]; then
+    saw_root=1
+    run_step "Remove Node Deps" "$REPO_ROOT" rm -rf node_modules
+  fi
+
+  while read -r app root; do
+    if [[ -d "$root/node_modules" ]]; then
+      saw_root=1
+      run_step "Remove Node Deps" "$root" rm -rf node_modules
+    fi
+  done < <(app_entries)
+
+  [[ "$saw_root" -eq 1 ]] || printf "No Node dependency roots found.\n"
+}
+
+remove_elixir_deps() {
+  local app
+  local root
+  local saw_root=0
+
+  while read -r app root; do
+    saw_root=1
+    run_step "Remove Elixir Deps" "$root" mix deps.clean --all
+  done < <(elixir_roots)
+
+  [[ "$saw_root" -eq 1 ]] || printf "No Elixir dependency roots found.\n"
+}
+
+remove_npm_package() {
+  local package="$1"
+  local app="$2"
+  local details
+  local root
+
+  require_command pnpm
+  [[ -n "$package" ]] || die "missing npm package name"
+  [[ -n "$app" ]] || die "missing --app <app> for npm dependency removal"
+
+  root="$(app_root "$app")"
+  [[ -f "$root/package.json" ]] || die "app '$app' has no package.json at $(relative_path "$root")"
+  details="$(printf "  app: %s\n  package: npm:%s" "$app" "$package")"
+
+  if [[ -f "$REPO_ROOT/pnpm-workspace.yaml" ]]; then
+    JUST_STEP_DISPLAY_DETAILS="$details" \
+      run_step "Remove npm Dependency" \
+      "$REPO_ROOT" \
+      pnpm --config.confirmModulesPurge=false --filter "./$(relative_path "$root")" remove "$package"
+  else
+    JUST_STEP_DISPLAY_DETAILS="$details" \
+      run_step "Remove npm Dependency" \
+      "$root" \
+      pnpm --config.confirmModulesPurge=false remove "$package"
+  fi
+}
+
+remove_hex_package() {
+  local package="$1"
+  local app="$2"
+  local details
+  local display_command
+  local root
+
+  [[ -n "$package" ]] || die "missing hex package name"
+  [[ -n "$app" ]] || die "missing --app <app> for hex dependency removal"
+
+  root="$(app_root "$app")"
+  [[ -f "$root/mix.exs" ]] || die "app '$app' has no mix.exs at $(relative_path "$root")"
+  details="$(printf "  app: %s\n  package: hex:%s" "$app" "$package")"
+  display_command="$(command_string elixir ../../.just/lib/remove_hex_dep.exs mix.exs "$package")"
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+    run_step "Remove Hex Dependency" \
+    "$root" \
+    elixir "$JUST_ROOT/lib/remove_hex_dep.exs" "$root/mix.exs" "$package"
+  run_step "Mix Format" "$root" mix format mix.exs
+  run_step "Clean Hex Dependency" "$root" mix deps.clean "$package" --unlock
+  run_step "Unlock Unused Hex Dependencies" "$root" mix deps.unlock --unused
+}
+
+parse_app_option() {
+  local app=""
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+    --app)
+      shift
+      [[ "$#" -gt 0 ]] || die "missing value for --app"
+      app="$1"
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+    esac
+
+    shift
+  done
+
+  printf "%s\n" "$app"
+}
+
+remove_deps() {
+  local selector="${1:-}"
+  local app
+
+  if [[ -z "$selector" ]]; then
+    remove_elixir_deps
+    remove_node_deps
+    return
+  fi
+
+  case "$selector" in
+  npm)
+    remove_node_deps
+    ;;
+  hex)
+    remove_elixir_deps
+    ;;
+  npm:*)
+    shift
+    app="$(parse_app_option "$@")"
+    remove_npm_package "${selector#npm:}" "$app"
+    ;;
+  hex:*)
+    shift
+    app="$(parse_app_option "$@")"
+    remove_hex_package "${selector#hex:}" "$app"
+    ;;
+  *)
+    die "unknown remove deps selector: $selector"
+    ;;
+  esac
+}
+
+main() {
+  cd "$REPO_ROOT"
+
+  case "${1:-}" in
+  "")
+    bash "$JUST_ROOT/commands/help"
+    ;;
+  deps)
+    shift
+    remove_deps "$@"
+    ;;
+  tools)
+    run_step "Remove Tools" "$REPO_ROOT" rm -rf .tools
+    ;;
+  *)
+    die "unknown remove target: $1"
+    ;;
+  esac
+}
+
+main "$@"

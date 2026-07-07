@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+main() {
+  local config="$REPO_ROOT/process-compose.yaml"
+  local display_command
+  local -a display_args
+
+  cd "$REPO_ROOT"
+
+  require_command process-compose
+  [[ -f "$config" ]] || die "missing process-compose.yaml at $config"
+
+  display_args=(process-compose up --config "$(relative_path "$config")" "$@")
+  display_command="$(command_string "${display_args[@]}")"
+  JUST_STEP_DISPLAY_COMMAND="$display_command" \
+    run_step "Devservers" "$REPO_ROOT" process-compose up --config "$config" "$@"
+}
+
+main "$@"

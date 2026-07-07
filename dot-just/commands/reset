@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+reset_db() {
+  local root
+  local saw_root=0
+
+  require_command mix
+
+  while read -r _app root; do
+    if [[ -d "$root/priv/repo/migrations" ]]; then
+      saw_root=1
+      run_step "Reset DB" "$root" mix ecto.reset
+    fi
+  done < <(elixir_roots)
+
+  [[ "$saw_root" -eq 1 ]] || printf "No Ecto apps found.\n"
+}
+
+main() {
+  cd "$REPO_ROOT"
+
+  case "${1:-}" in
+  db)
+    shift
+    [[ "$#" -eq 0 ]] || die "just reset db does not accept extra arguments"
+    reset_db
+    ;;
+  *)
+    die "unknown reset target: ${1:-}; use 'just reset db'"
+    ;;
+  esac
+}
+
+main "$@"

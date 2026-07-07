@@ -1,0 +1,317 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+declare -a CHECK_FILES=()
+declare -a OPENAPI_FILES=()
+declare -a TYPECHECK_ROOTS=()
+
+add_file() {
+  local file="$1"
+
+  case "$file" in
+  *.tla | *.cfg | *.als)
+    CHECK_FILES+=("$file")
+    ;;
+  *.json | *.yaml | *.yml)
+    if is_openapi_file "$file"; then
+      OPENAPI_FILES+=("$file")
+    fi
+    ;;
+  esac
+}
+
+is_openapi_file() {
+  local file="$1"
+
+  grep -Eq '(^[[:space:]]*(openapi|swagger)[[:space:]]*:)|("[[:space:]]*(openapi|swagger)[[:space:]]*"[[:space:]]*:)' "$file"
+}
+
+collect_path() {
+  local path
+
+  path="$(resolve_path "$1")"
+
+  if [[ -d "$path" ]]; then
+    while IFS= read -r -d '' file; do
+      add_file "$file"
+    done < <(
+      find "$path" -type f \( \
+        -name '*.tla' -o \
+        -name '*.cfg' -o \
+        -name '*.als' -o \
+        -name '*.json' -o \
+        -name '*.yaml' -o \
+        -name '*.yml' \
+        \) -print0
+    )
+  elif [[ -f "$path" ]]; then
+    add_file "$path"
+  else
+    die "path does not exist: $path"
+  fi
+}
+
+unique_files() {
+  local file
+
+  [[ "${#CHECK_FILES[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${CHECK_FILES[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
+    [[ -n "$file" ]] && printf "%s\n" "$file"
+  done
+}
+
+unique_openapi_files() {
+  local file
+
+  [[ "${#OPENAPI_FILES[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${OPENAPI_FILES[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
+    [[ -n "$file" ]] && printf "%s\n" "$file"
+  done
+}
+
+package_has_script() {
+  local root="$1"
+  local script="$2"
+
+  node -e '
+    const fs = require("node:fs");
+    const packagePath = process.argv[1];
+    const script = process.argv[2];
+    const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+
+    process.exit(pkg.scripts && pkg.scripts[script] ? 0 : 1);
+  ' "$root/package.json" "$script"
+}
+
+add_typecheck_root() {
+  local root="$1"
+
+  if package_has_script "$root" typecheck; then
+    TYPECHECK_ROOTS+=("$root")
+  fi
+}
+
+collect_type_path() {
+  local selector="$1"
+  local path
+  local app
+  local root
+  local matched=0
+
+  path="$(resolve_path "$selector")"
+
+  [[ -e "$path" ]] || die "path does not exist: $path"
+
+  if [[ "$path" == "$REPO_ROOT" ]]; then
+    while read -r _app root; do
+      add_typecheck_root "$root"
+    done < <(node_apps)
+    return
+  fi
+
+  while read -r app root; do
+    if [[ "$path" == "$root" || "$path" == "$root/"* ]]; then
+      matched=1
+      add_typecheck_root "$root"
+    fi
+  done < <(node_apps)
+
+  if [[ "$matched" -eq 0 ]]; then
+    printf "No TypeScript app matched %s\n" "$(relative_path "$path")" >&2
+  fi
+}
+
+unique_typecheck_roots() {
+  local root
+
+  printf "%s\n" "${TYPECHECK_ROOTS[@]}" | awk '!seen[$0]++' | while IFS= read -r root; do
+    [[ -n "$root" ]] && printf "%s\n" "$root"
+  done
+}
+
+require_jar() {
+  local jar="$1"
+  local tool="$2"
+
+  [[ -s "$jar" ]] ||
+    die "$tool is not installed at $jar; run 'just install tools' first"
+}
+
+check_tla_module() {
+  local jar="$1"
+  local file="$2"
+  local display_command
+
+  display_command="$(command_string java -cp "$(relative_path "$jar")" tla2sany.SANY "$(relative_path "$file")")"
+  JUST_STEP_DISPLAY_COMMAND="$display_command" \
+    collect_step "TLA SANY" "$REPO_ROOT" java -cp "$jar" tla2sany.SANY "$file"
+}
+
+check_tla_model() {
+  local jar="$1"
+  local cfg="$2"
+  local tla="${cfg%.cfg}.tla"
+  local display_command
+
+  [[ -f "$tla" ]] || die "cannot find TLA module for config: $cfg"
+
+  display_command="$(command_string java -jar "$(relative_path "$jar")" -config "$(relative_path "$cfg")" "$(relative_path "$tla")")"
+  JUST_STEP_DISPLAY_COMMAND="$display_command" \
+    collect_step "TLA TLC" "$REPO_ROOT" java -jar "$jar" -config "$cfg" "$tla"
+}
+
+check_alloy_model() {
+  local jar="$1"
+  local file="$2"
+  local display_command
+
+  display_command="$(command_string java -jar "$(relative_path "$jar")" commands "$(relative_path "$file")")"
+  JUST_STEP_DISPLAY_COMMAND="$display_command" \
+    collect_step "Alloy" "$REPO_ROOT" java -jar "$jar" commands "$file"
+}
+
+collect_default_specs() {
+  local path
+  local saw_path=0
+
+  for path in "$REPO_ROOT/docs" "$REPO_ROOT/openapi"; do
+    if [[ -d "$path" ]]; then
+      saw_path=1
+      collect_path "$path"
+    fi
+  done
+
+  [[ "$saw_path" -eq 1 ]] || die "docs or openapi directory does not exist"
+}
+
+check_openapi_spec() {
+  local file="$1"
+  local display_command
+
+  require_command vacuum
+  display_command="$(command_string vacuum lint "$(relative_path "$file")")"
+  JUST_STEP_DISPLAY_COMMAND="$display_command" \
+    collect_step "OpenAPI" "$REPO_ROOT" vacuum lint "$file"
+}
+
+check_specs() {
+  local path
+  local tla_jar
+  local alloy_jar
+  local file
+  local saw_file=0
+
+  if [[ "$#" -eq 0 ]]; then
+    collect_default_specs
+  else
+    for path in "$@"; do
+      collect_path "$path"
+    done
+  fi
+
+  if [[ "${#CHECK_FILES[@]}" -eq 0 && "${#OPENAPI_FILES[@]}" -eq 0 ]]; then
+    printf "No .tla, .cfg, .als, or OpenAPI files found.\n"
+    return
+  fi
+
+  if [[ "${#CHECK_FILES[@]}" -gt 0 ]]; then
+    tla_jar="$(tool_jar tla)"
+    alloy_jar="$(tool_jar alloy)"
+  fi
+
+  while IFS= read -r file; do
+    saw_file=1
+
+    case "$file" in
+    *.tla)
+      require_jar "$tla_jar" "tla"
+      check_tla_module "$tla_jar" "$file"
+
+      if [[ -f "${file%.tla}.cfg" ]]; then
+        check_tla_model "$tla_jar" "${file%.tla}.cfg"
+      fi
+      ;;
+    *.cfg)
+      require_jar "$tla_jar" "tla"
+      check_tla_model "$tla_jar" "$file"
+      ;;
+    *.als)
+      require_jar "$alloy_jar" "alloy"
+      check_alloy_model "$alloy_jar" "$file"
+      ;;
+    esac
+  done < <(unique_files)
+
+  while IFS= read -r file; do
+    saw_file=1
+    check_openapi_spec "$file"
+  done < <(unique_openapi_files)
+
+  if [[ "$saw_file" -eq 1 ]]; then
+    fail_if_steps_failed
+  else
+    printf "No .tla, .cfg, .als, or OpenAPI files found.\n"
+  fi
+}
+
+check_types() {
+  local path
+  local root
+  local saw_root=0
+
+  if [[ "$#" -eq 0 ]]; then
+    while read -r _app root; do
+      add_typecheck_root "$root"
+    done < <(node_apps)
+  else
+    for path in "$@"; do
+      collect_type_path "$path"
+    done
+  fi
+
+  while IFS= read -r root; do
+    saw_root=1
+    collect_step "Typecheck" "$root" pnpm run typecheck
+  done < <(unique_typecheck_roots)
+
+  if [[ "$saw_root" -eq 1 ]]; then
+    fail_if_steps_failed
+  else
+    printf "No TypeScript checks selected.\n"
+  fi
+}
+
+check_knip() {
+  [[ "$#" -eq 0 ]] || die "just check knip does not accept paths"
+
+  run_step "Knip" "$REPO_ROOT" pnpm exec knip
+}
+
+main() {
+  cd "$REPO_ROOT"
+
+  case "${1:-}" in
+  specs)
+    shift
+    check_specs "$@"
+    ;;
+  types)
+    shift
+    check_types "$@"
+    ;;
+  knip)
+    shift
+    check_knip "$@"
+    ;;
+  *)
+    die "unknown check target: ${1:-}; use 'just check specs [PATH...]', 'just check types [PATH...]', or 'just check knip'"
+    ;;
+  esac
+}
+
+main "$@"

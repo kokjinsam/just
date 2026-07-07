@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+declare -a SELECTED_APPS=()
+
+add_selected_app() {
+  local app="$1"
+  local root="$2"
+
+  SELECTED_APPS+=("$app"$'\t'"$root")
+}
+
+select_path() {
+  local selector="$1"
+  local app
+  local entry
+  local path
+  local root
+
+  path="$(resolve_path "$selector")"
+  [[ -e "$path" ]] || die "path does not exist: $path"
+
+  entry="$(app_entry_for_path "$path")" ||
+    die "path is not under an app configured in just.yaml: $(relative_path "$path")"
+
+  app="${entry%% *}"
+  root="${entry#* }"
+  add_selected_app "$app" "$root"
+}
+
+select_defaults() {
+  local app
+  local root
+
+  while read -r app root; do
+    add_selected_app "$app" "$root"
+  done < <(app_entries)
+}
+
+unique_selected_apps() {
+  [[ "${#SELECTED_APPS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${SELECTED_APPS[@]}" | awk -F '\t' 'NF && !seen[$1 "\t" $2]++'
+}
+
+run_tests() {
+  local app
+  local root
+  local saw_step=0
+
+  while IFS=$'\t' read -r app root; do
+    if [[ -f "$root/mix.exs" ]]; then
+      require_command mix
+      saw_step=1
+      collect_step "Mix Test" "$root" mix test
+    fi
+
+    if [[ -f "$root/package.json" ]] && package_has_script "$root" test; then
+      require_command pnpm
+      saw_step=1
+      collect_step "Node Test" "$root" pnpm run test
+    fi
+  done < <(unique_selected_apps)
+
+  if [[ "$saw_step" -eq 1 ]]; then
+    fail_if_steps_failed
+  else
+    printf "No test commands selected.\n"
+  fi
+}
+
+main() {
+  local path
+
+  cd "$REPO_ROOT"
+
+  if [[ "$#" -eq 0 ]]; then
+    select_defaults
+  else
+    for path in "$@"; do
+      select_path "$path"
+    done
+  fi
+
+  run_tests
+}
+
+main "$@"

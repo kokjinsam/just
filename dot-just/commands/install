@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+download() {
+  local url="$1"
+  local destination="$2"
+  local tmp
+
+  mkdir -p "$(dirname -- "$destination")"
+  tmp="$(mktemp "$destination.tmp.XXXXXX")"
+
+  if ! curl -fsSL --retry 3 --retry-delay 1 -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  mv "$tmp" "$destination"
+}
+
+write_tla_shim() {
+  local version="$1"
+  local shim="$TOOLS_DIR/bin/tla"
+
+  mkdir -p "$(dirname -- "$shim")"
+
+  cat >"$shim" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOLS_DIR="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
+exec java -jar "\$TOOLS_DIR/tla/$version/tla2tools.jar" "\$@"
+EOF
+
+  chmod +x "$shim"
+}
+
+write_alloy_shim() {
+  local version="$1"
+  local shim="$TOOLS_DIR/bin/alloy"
+
+  mkdir -p "$(dirname -- "$shim")"
+
+  cat >"$shim" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+TOOLS_DIR="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")/.." && pwd)"
+exec java -jar "\$TOOLS_DIR/alloy/$version/org.alloytools.alloy.dist.jar" "\$@"
+EOF
+
+  chmod +x "$shim"
+}
+
+install_tla() {
+  local version="$1"
+  local destination="$TOOLS_DIR/tla/$version/tla2tools.jar"
+  local url="https://github.com/tlaplus/tlaplus/releases/download/v$version/tla2tools.jar"
+
+  if [[ -s "$destination" ]]; then
+    printf "tla %s already installed at %s\n" "$version" "$destination"
+  else
+    printf "Installing tla %s...\n" "$version"
+    download "$url" "$destination" ||
+      die "could not download tla $version from $url"
+  fi
+
+  write_tla_shim "$version"
+}
+
+install_alloy() {
+  local version="$1"
+  local destination="$TOOLS_DIR/alloy/$version/org.alloytools.alloy.dist.jar"
+  local url="https://repo1.maven.org/maven2/org/alloytools/org.alloytools.alloy.dist/$version/org.alloytools.alloy.dist-$version.jar"
+
+  if [[ -s "$destination" ]]; then
+    printf "alloy %s already installed at %s\n" "$version" "$destination"
+  else
+    printf "Installing alloy %s...\n" "$version"
+    download "$url" "$destination" ||
+      die "could not download alloy $version from $url"
+  fi
+
+  write_alloy_shim "$version"
+}
+
+install_tools() {
+  local name
+  local version
+  local saw_tool=0
+
+  require_command curl
+  require_command java
+
+  while read -r name version; do
+    saw_tool=1
+
+    case "$name" in
+    tla)
+      install_tla "$version"
+      ;;
+    alloy)
+      install_alloy "$version"
+      ;;
+    *)
+      die "unknown tool in just.yaml: $name"
+      ;;
+    esac
+  done < <(yaml_tool_entries)
+
+  [[ "$saw_tool" -eq 1 ]] || die "no tools configured in just.yaml"
+}
+
+install_elixir_deps() {
+  local app
+  local root
+  local saw_root=0
+
+  while read -r app root; do
+    saw_root=1
+    run_step "Install Elixir Deps" "$root" mix deps.get
+  done < <(elixir_roots)
+
+  [[ "$saw_root" -eq 1 ]] || printf "No Elixir apps found.\n"
+}
+
+install_node_deps() {
+  local app
+  local root
+  local saw_root=0
+
+  while read -r app root; do
+    saw_root=1
+    run_step "Install Node Deps" "$root" pnpm --config.confirmModulesPurge=false install
+  done < <(node_install_roots)
+
+  [[ "$saw_root" -eq 1 ]] || printf "No Node package roots found.\n"
+}
+
+install_all_deps() {
+  install_elixir_deps
+  install_node_deps
+}
+
+install_npm_package() {
+  local package="$1"
+  local version="$2"
+  local app="$3"
+  local details
+  local root
+
+  require_command pnpm
+  [[ -n "$package" ]] || die "missing npm package name"
+  [[ -n "$version" ]] || die "missing npm package version"
+  [[ -n "$app" ]] || die "missing --app <app> for npm dependency install"
+
+  root="$(app_root "$app")"
+  [[ -f "$root/package.json" ]] || die "app '$app' has no package.json at $(relative_path "$root")"
+  details="$(printf "  app: %s\n  package: npm:%s\n  version: %s" "$app" "$package" "$version")"
+
+  if [[ -f "$REPO_ROOT/pnpm-workspace.yaml" ]]; then
+    JUST_STEP_DISPLAY_DETAILS="$details" \
+      run_step "Install npm Dependency" \
+      "$REPO_ROOT" \
+      pnpm --config.confirmModulesPurge=false --filter "./$(relative_path "$root")" add "$package@$version"
+  else
+    JUST_STEP_DISPLAY_DETAILS="$details" \
+      run_step "Install npm Dependency" \
+      "$root" \
+      pnpm --config.confirmModulesPurge=false add "$package@$version"
+  fi
+}
+
+install_hex_package() {
+  local package="$1"
+  local version="$2"
+  local app="$3"
+  local details
+  local display_command
+  local root
+
+  [[ -n "$package" ]] || die "missing hex package name"
+  [[ -n "$version" ]] || die "missing hex package version"
+  [[ -n "$app" ]] || die "missing --app <app> for hex dependency install"
+
+  root="$(app_root "$app")"
+  [[ -f "$root/mix.exs" ]] || die "app '$app' has no mix.exs at $(relative_path "$root")"
+  details="$(printf "  app: %s\n  package: hex:%s\n  version: %s" "$app" "$package" "$version")"
+  display_command="$(command_string elixir ../../.just/lib/install_hex_dep.exs mix.exs "$package" "$version")"
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+    run_step "Add Hex Dependency" \
+    "$root" \
+    elixir "$JUST_ROOT/lib/install_hex_dep.exs" "$root/mix.exs" "$package" "$version"
+  run_step "Mix Format" "$root" mix format mix.exs
+  run_step "Fetch Hex Dependencies" "$root" mix deps.get
+}
+
+parse_app_option() {
+  local app=""
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+    --app)
+      shift
+      [[ "$#" -gt 0 ]] || die "missing value for --app"
+      app="$1"
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+    esac
+
+    shift
+  done
+
+  printf "%s\n" "$app"
+}
+
+install_deps() {
+  local selector="${1:-}"
+  local version="${2:-}"
+  local app
+
+  if [[ -z "$selector" ]]; then
+    install_all_deps
+    return
+  fi
+
+  case "$selector" in
+  npm:*)
+    [[ "$#" -ge 2 ]] || die "usage: just install deps npm:<pkg> <version> --app <app>"
+    shift 2
+    app="$(parse_app_option "$@")"
+    install_npm_package "${selector#npm:}" "$version" "$app"
+    ;;
+  hex:*)
+    [[ "$#" -ge 2 ]] || die "usage: just install deps hex:<pkg> <version> --app <app>"
+    shift 2
+    app="$(parse_app_option "$@")"
+    install_hex_package "${selector#hex:}" "$version" "$app"
+    ;;
+  *)
+    die "unknown install deps selector: $selector"
+    ;;
+  esac
+}
+
+main() {
+  cd "$REPO_ROOT"
+
+  case "${1:-}" in
+  "" | all)
+    install_tools
+    install_all_deps
+    ;;
+  tools)
+    shift
+    [[ "$#" -eq 0 ]] || die "just install tools does not accept extra arguments"
+    install_tools
+    ;;
+  deps)
+    shift
+    install_deps "$@"
+    ;;
+  *)
+    die "unknown install target: $1"
+    ;;
+  esac
+}
+
+main "$@"

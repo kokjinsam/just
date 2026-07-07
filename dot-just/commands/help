@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat <<'EOF'
+Project Dev Tools
+=================
+
+Install:
+  just install                         Install tools and dependencies
+  just install tools                   Install tools from just.yaml into .tools
+  just install deps                    Install Elixir and Node dependencies
+  just install deps npm:<pkg> <version> --app <app>
+                                       Add <pkg>@<version> to a Node app
+  just install deps hex:<pkg> <version> --app <app>
+                                       Add <pkg>@<version> to an Elixir app
+
+Remove:
+  just remove                          Show remove commands
+  just remove deps                     Remove Elixir and Node dependencies
+  just remove deps npm                 Remove node_modules only
+  just remove deps hex                 Remove Elixir deps only
+  just remove deps npm:<pkg> --app <app>
+                                       Remove <pkg> from a Node app
+  just remove deps hex:<pkg> --app <app>
+                                       Remove <pkg> from an Elixir app
+
+Check:
+  just check specs [PATH...]           Check TLA+, Alloy, and OpenAPI specs
+  just check types [PATH...]           Typecheck TypeScript apps under paths
+  just check knip                      Check unused files, dependencies, and exports
+
+Test:
+  just test [PATH...]                  Run tests for selected apps
+
+Build:
+  just build [PATH...]                 Build or compile selected apps
+
+Database:
+  just migrate db                      Run Phoenix database migrations
+  just reset db                        Drop, recreate, migrate, and seed the database
+
+Dev:
+  just dev [PROCESS...]                Run devservers with process-compose
+  just dev --dry-run                   Validate process-compose.yaml without starting servers
+
+Lint:
+  just lint [PATH...]                  Lint Elixir, JS, TS, and CSS paths
+
+Format:
+  just format [PATH...]                Format JS, CSS, Elixir, and repo tooling paths
+  just format --check [PATH...]        Check JS, CSS, Elixir, and repo tooling paths
+EOF

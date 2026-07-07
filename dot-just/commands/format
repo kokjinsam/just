@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+declare -a OXFMT_PATHS=()
+declare -a MIX_FORMAT_INPUTS=()
+declare -a MIX_FORMAT_ROOTS=()
+declare -a FORMAT_SELECTORS=()
+
+default_oxfmt_paths() {
+  local path
+  local root
+
+  while read -r _app root; do
+    if [[ -f "$root/mix.exs" ]]; then
+      [[ -d "$root/assets/css" ]] && printf "%s\n" "$root/assets/css"
+    else
+      printf "%s\n" "$root"
+    fi
+  done < <(app_entries)
+
+  for path in \
+    "$REPO_ROOT/package.json" \
+    "$REPO_ROOT/pnpm-workspace.yaml" \
+    "$REPO_ROOT/oxlint.config.ts" \
+    "$REPO_ROOT/stylelint.config.js" \
+    "$REPO_ROOT/knip.json" \
+    "$REPO_ROOT/process-compose.yaml" \
+    "$REPO_ROOT/.oxfmtrc.json" \
+    "$REPO_ROOT/.editorconfig" \
+    "$REPO_ROOT/.vscode/settings.json" \
+    "$REPO_ROOT/Justfile" \
+    "$JUST_ROOT/bin/workflow" \
+    "$JUST_ROOT/commands" \
+    "$JUST_ROOT/lib/lib.sh"; do
+    [[ -e "$path" ]] && printf "%s\n" "$path"
+  done
+}
+
+normalize_path() {
+  local path="$1"
+  local dir
+  local base
+
+  if [[ -d "$path" ]]; then
+    (cd "$path" && pwd)
+    return
+  fi
+
+  dir="$(dirname "$path")"
+  base="$(basename "$path")"
+
+  printf "%s/%s\n" "$(cd "$dir" && pwd)" "$base"
+}
+
+add_format_path() {
+  local path
+  local root
+
+  path="$(resolve_path "$1")"
+  [[ -e "$path" ]] || die "path does not exist: $path"
+  path="$(normalize_path "$path")"
+
+  if [[ "$path" == "$REPO_ROOT" ]]; then
+    add_oxfmt_path "$path"
+    while read -r _ root; do
+      add_mix_format_root "$root"
+    done < <(elixir_roots)
+  elif root="$(elixir_root_for_path "$path")"; then
+    add_elixir_format_path "$root" "$path"
+  else
+    add_oxfmt_path "$path"
+  fi
+}
+
+add_default_format_paths() {
+  local path
+
+  while IFS= read -r path; do
+    add_oxfmt_path "$path"
+  done < <(default_oxfmt_paths)
+
+  while read -r _ path; do
+    add_mix_format_root "$path"
+  done < <(elixir_roots)
+}
+
+add_oxfmt_path() {
+  local path="$1"
+
+  OXFMT_PATHS+=("$(relative_path "$path")")
+}
+
+add_mix_format_root() {
+  local root="$1"
+
+  MIX_FORMAT_ROOTS+=("$root")
+}
+
+mix_relative_path() {
+  local root="$1"
+  local path="$2"
+
+  if [[ "$path" == "$root" ]]; then
+    printf ".\n"
+  else
+    printf "%s\n" "${path#"$root"/}"
+  fi
+}
+
+add_mix_format_file() {
+  local root="$1"
+  local file="$2"
+
+  case "$file" in
+  *.ex | *.exs | *.heex)
+    MIX_FORMAT_INPUTS+=("$root"$'\t'"$(mix_relative_path "$root" "$file")")
+    ;;
+  esac
+}
+
+add_elixir_format_file() {
+  local root="$1"
+  local file="$2"
+
+  case "$file" in
+  *.css)
+    add_oxfmt_path "$file"
+    ;;
+  *.ex | *.exs | *.heex)
+    add_mix_format_file "$root" "$file"
+    ;;
+  esac
+}
+
+add_elixir_format_path() {
+  local root="$1"
+  local path="$2"
+  local file
+
+  if [[ "$path" == "$root" ]]; then
+    add_mix_format_root "$root"
+    path="$root/assets/css"
+  fi
+
+  if [[ -f "$path" ]]; then
+    add_elixir_format_file "$root" "$path"
+    return
+  fi
+
+  while IFS= read -r -d '' file; do
+    add_elixir_format_file "$root" "$file"
+  done < <(
+    find "$path" \
+      \( \
+      -path "$root/_build" -o \
+      -path "$root/_build/*" -o \
+      -path "$root/deps" -o \
+      -path "$root/deps/*" -o \
+      -path "$root/assets/node_modules" -o \
+      -path "$root/assets/node_modules/*" -o \
+      -path "$root/priv/static/assets" -o \
+      -path "$root/priv/static/assets/*" \
+      \) -prune \
+      -o -type f \( -name '*.css' -o -name '*.ex' -o -name '*.exs' -o -name '*.heex' \) -print0
+  )
+}
+
+unique_oxfmt_paths() {
+  [[ "${#OXFMT_PATHS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${OXFMT_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_mix_inputs() {
+  [[ "${#MIX_FORMAT_INPUTS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${MIX_FORMAT_INPUTS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_mix_format_roots() {
+  [[ "${#MIX_FORMAT_ROOTS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${MIX_FORMAT_ROOTS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_mix_input_roots() {
+  [[ "${#MIX_FORMAT_INPUTS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${MIX_FORMAT_INPUTS[@]}" | awk -F '\t' 'NF && !seen[$1]++ { print $1 }'
+}
+
+mix_inputs_for_root() {
+  local root="$1"
+
+  [[ "${#MIX_FORMAT_INPUTS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${MIX_FORMAT_INPUTS[@]}" | awk -F '\t' -v root="$root" '$1 == root && $2 != "" && !seen[$2]++ { print $2 }'
+}
+
+format_selector_summary() {
+  printf "%s\n" "${FORMAT_SELECTORS[@]}" | awk 'NF && !seen[$0]++' | paste -sd ' ' -
+}
+
+format_selector_display_suffix() {
+  if [[ "${#FORMAT_SELECTORS[@]}" -gt 0 ]]; then
+    printf " %s" "$(format_selector_summary)"
+  fi
+}
+
+format_summary_details() {
+  local count="$1"
+  local unit="$2"
+  local label
+
+  if [[ "${#FORMAT_SELECTORS[@]}" -eq 0 ]]; then
+    label="repo defaults"
+  else
+    label="$(format_selector_summary)"
+  fi
+
+  if [[ "$count" -eq 1 && "$unit" == "files" ]]; then
+    unit="file"
+  fi
+
+  printf "  files: %s (%s %s)" "$label" "$count" "$unit"
+}
+
+run_oxfmt() {
+  local check="$1"
+  local path
+  local label
+  local display_command
+  local details
+  local -a paths=()
+
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(unique_oxfmt_paths)
+
+  [[ "${#paths[@]}" -gt 0 ]] || return 0
+
+  require_command pnpm
+
+  if [[ "$check" -eq 1 ]]; then
+    label="Oxfmt Check"
+    display_command="pnpm exec oxfmt --check$(format_selector_display_suffix)"
+    details="$(format_summary_details "${#paths[@]}" "files")"
+    JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+      collect_step "$label" "$REPO_ROOT" pnpm exec oxfmt --check --no-error-on-unmatched-pattern "${paths[@]}"
+  else
+    label="Oxfmt"
+    display_command="pnpm exec oxfmt$(format_selector_display_suffix)"
+    details="$(format_summary_details "${#paths[@]}" "files")"
+    JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+      collect_step "$label" "$REPO_ROOT" pnpm exec oxfmt --no-error-on-unmatched-pattern "${paths[@]}"
+  fi
+}
+
+run_mix_format() {
+  local check="$1"
+  local input
+  local root
+  local label
+  local display_command
+  local details
+  local -a inputs=()
+  local -a roots=()
+
+  while IFS= read -r root; do
+    roots+=("$root")
+  done < <(unique_mix_format_roots)
+
+  while IFS= read -r root; do
+    roots+=("$root")
+  done < <(unique_mix_input_roots)
+
+  [[ "${#roots[@]}" -gt 0 ]] || return 0
+
+  require_command mix
+
+  while IFS= read -r root; do
+    if [[ -z "$root" ]]; then
+      continue
+    fi
+
+    if printf "%s\n" "${MIX_FORMAT_ROOTS[@]}" | grep -Fxq -- "$root"; then
+      if [[ "$check" -eq 1 ]]; then
+        collect_step "Mix Format Check" "$root" mix format --check-formatted
+      else
+        collect_step "Mix Format" "$root" mix format
+      fi
+
+      continue
+    fi
+
+    inputs=()
+    while IFS= read -r input; do
+      inputs+=("$input")
+    done < <(mix_inputs_for_root "$root")
+
+    [[ "${#inputs[@]}" -gt 0 ]] || continue
+
+    if [[ "$check" -eq 1 ]]; then
+      label="Mix Format Check"
+      display_command="mix format --check-formatted$(format_selector_display_suffix)"
+      details="$(format_summary_details "${#inputs[@]}" "files")"
+      JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+        collect_step "$label" "$root" mix format --check-formatted "${inputs[@]}"
+    else
+      label="Mix Format"
+      display_command="mix format$(format_selector_display_suffix)"
+      details="$(format_summary_details "${#inputs[@]}" "files")"
+      JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
+        collect_step "$label" "$root" mix format "${inputs[@]}"
+    fi
+  done < <(printf "%s\n" "${roots[@]}" | awk 'NF && !seen[$0]++')
+}
+
+main() {
+  local check=0
+  local path
+  local saw_path=0
+  local stop_options=0
+
+  cd "$REPO_ROOT"
+
+  while [[ "$#" -gt 0 ]]; do
+    if [[ "$stop_options" -eq 0 ]]; then
+      case "$1" in
+      --check)
+        check=1
+        shift
+        continue
+        ;;
+      --)
+        stop_options=1
+        shift
+        continue
+        ;;
+      -*)
+        die "unknown format option: $1"
+        ;;
+      esac
+    fi
+
+    saw_path=1
+    FORMAT_SELECTORS+=("$1")
+    add_format_path "$1"
+    shift
+  done
+
+  if [[ "$saw_path" -eq 0 ]]; then
+    add_default_format_paths
+  fi
+
+  if [[ "${#OXFMT_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
+    printf "No formatter-compatible files selected.\n"
+    return
+  fi
+
+  run_oxfmt "$check"
+  run_mix_format "$check"
+  fail_if_steps_failed
+}
+
+main "$@"
