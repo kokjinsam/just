@@ -71,6 +71,11 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "lints OpenAPI specs with Vacuum"
+    When call test_default_lint_runs_vacuum_for_openapi_specs
+    The status should equal 0
+  End
+
   It "lints selected Python paths with Ruff config"
     When call test_lint_selected_python_uses_ruff_config
     The status should equal 0
@@ -136,6 +141,11 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "leaves OpenAPI linting to lint"
+    When call test_check_specs_does_not_lint_openapi_specs
+    The status should equal 0
+  End
+
   It "checks TypeScript apps with compact summary"
     When call test_check_types_uses_compact_summary
     The status should equal 0
@@ -143,6 +153,16 @@ Describe "workflow scripts"
 
   It "checks selected Python paths with Pyrefly"
     When call test_check_types_runs_pyrefly_for_selected_python
+    The status should equal 0
+  End
+
+  It "checks Dialyzer for Elixir apps"
+    When call test_check_dialyzer_uses_elixir_roots
+    The status should equal 0
+  End
+
+  It "reports Dialyzer failures"
+    When call test_check_dialyzer_reports_failures
     The status should equal 0
   End
 

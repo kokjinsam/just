@@ -439,6 +439,9 @@ case "$*" in
   "sobelow --private --exit --threshold high")
     exit "${JUST_FAKE_MIX_SOBELOW_STATUS:-0}"
     ;;
+  "dialyzer --format short")
+    exit "${JUST_FAKE_MIX_DIALYZER_STATUS:-0}"
+    ;;
 esac
 
 exit 0
@@ -533,6 +536,16 @@ printf "\n" >> "$JUST_FAKE_LOG"
 exit "${JUST_FAKE_ALLOY_STATUS:-0}"
 '
 
+  # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/vacuum" '
+printf "vacuum\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+exit "${JUST_FAKE_VACUUM_STATUS:-0}"
+'
+
   : >"$fixture/fake.log"
   printf "%s\n" "$fixture"
 }
@@ -564,6 +577,7 @@ run_wrapper() {
         JUST_FAKE_LOG="$fixture/fake.log" \
         JUST_FAKE_ALLOY_STATUS="${JUST_FAKE_ALLOY_STATUS:-0}" \
         JUST_FAKE_JAVA_STATUS="${JUST_FAKE_JAVA_STATUS:-0}" \
+        JUST_FAKE_MIX_DIALYZER_STATUS="${JUST_FAKE_MIX_DIALYZER_STATUS:-0}" \
         JUST_FAKE_MIX_FORMAT_CHECK_STATUS="${JUST_FAKE_MIX_FORMAT_CHECK_STATUS:-0}" \
         JUST_FAKE_MIX_SOBELOW_STATUS="${JUST_FAKE_MIX_SOBELOW_STATUS:-0}" \
         JUST_FAKE_PNPM_FAIL_OXFMT="${JUST_FAKE_PNPM_FAIL_OXFMT:-0}" \
@@ -576,6 +590,7 @@ run_wrapper() {
         JUST_FAKE_RUFF_CHECK_STATUS="${JUST_FAKE_RUFF_CHECK_STATUS:-0}" \
         JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
         JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
+        JUST_FAKE_VACUUM_STATUS="${JUST_FAKE_VACUUM_STATUS:-0}" \
         TLA2TOOLS_JAR="$fixture/tla2tools.jar" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
   ) >"$__captured_output" 2>&1
@@ -871,6 +886,23 @@ test_lint_enforces_spec_placement() {
   assert_output_contains "$output" "[error] [check specs live under docs/] [docs/] ." || return
 }
 
+test_default_lint_runs_vacuum_for_openapi_specs() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  mkdir -p "$fixture/docs/api"
+  printf "openapi: 3.1.0\ninfo:\n  title: API\n  version: 1.0.0\npaths: {}\n" >"$fixture/docs/api/openapi.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" lint
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured OpenAPI lint: vacuum" || return
+  assert_output_contains "$output" "[info] [vacuum lint docs/api/openapi.yaml] [openapi] docs/api/openapi.yaml" || return
+  assert_log_entry "$fixture" vacuum "$fixture" lint "$fixture/docs/api/openapi.yaml" || return
+}
+
 test_lint_selected_python_uses_ruff_config() {
   local fixture
   local output
@@ -1119,6 +1151,22 @@ test_check_specs_directory_discovery_uses_gitignore() {
   assert_log_not_contains "$fixture" "docs/specs/generated/Ignored.tla" || return
 }
 
+test_check_specs_does_not_lint_openapi_specs() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  mkdir -p "$fixture/docs/api"
+  printf "openapi: 3.1.0\ninfo:\n  title: API\n  version: 1.0.0\npaths: {}\n" >"$fixture/docs/api/openapi.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" check specs docs/api/openapi.yaml
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "No .tla, .cfg, or .als files found." || return
+  assert_log_not_contains "$fixture" "vacuum" || return
+}
+
 test_check_types_uses_compact_summary() {
   local fixture
   local output
@@ -1155,6 +1203,37 @@ test_check_types_runs_pyrefly_for_selected_python() {
   assert_output_contains "$output" "[info] [pyrefly check scripts/foo.py] [auto] scripts/foo.py" || return
   assert_log_entry "$fixture" pyrefly "$fixture" check scripts/foo.py || return
   assert_log_not_contains "$fixture" $'run\ttypecheck' || return
+}
+
+test_check_dialyzer_uses_elixir_roots() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" check dialyzer
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured dialyzer: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] [mix dialyzer --format short] [apps/api/mix.exs] apps/api" || return
+  assert_output_not_contains "$output" "Command summary" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_check_dialyzer_reports_failures() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  JUST_FAKE_MIX_DIALYZER_STATUS=43 run_wrapper status output "$fixture" "$fixture" check dialyzer
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "[error] [mix dialyzer --format short] [apps/api/mix.exs] apps/api" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
 }
 
 test_check_knip_uses_compact_summary() {

@@ -9,6 +9,7 @@ declare -a OXLINT_PATHS=()
 declare -a RUFF_LINT_PATHS=()
 declare -a STYLELINT_PATHS=()
 declare -a SPEC_PLACEMENT_PATHS=()
+declare -a OPENAPI_LINT_FILES=()
 declare -a LINT_SELECTORS=()
 declare -a MIX_LINT_ROOTS=()
 declare -a LINT_CONFIG_LEVELS=()
@@ -115,6 +116,8 @@ add_default_lint_targets() {
   while read -r _app root; do
     add_mix_lint_root "$root"
   done < <(elixir_roots)
+
+  add_default_openapi_lint_targets
 }
 
 normalize_path() {
@@ -167,6 +170,31 @@ add_spec_placement_path() {
   SPEC_PLACEMENT_PATHS+=("$path")
 }
 
+add_openapi_lint_file() {
+  local file="$1"
+
+  OPENAPI_LINT_FILES+=("$file")
+}
+
+add_default_openapi_lint_targets() {
+  local path
+  local file
+
+  for path in "$REPO_ROOT/docs" "$REPO_ROOT/openapi"; do
+    [[ -d "$path" ]] || continue
+
+    while IFS= read -r -d '' file; do
+      case "$file" in
+      *.json | *.yaml | *.yml)
+        if just_is_openapi_file "$file"; then
+          add_openapi_lint_file "$file"
+        fi
+        ;;
+      esac
+    done < <(discover_project_files "$path")
+  done
+}
+
 has_mix_lint_files() {
   local path="$1"
   local file
@@ -189,6 +217,14 @@ add_lint_file() {
   if just_is_spec_file "$file"; then
     add_spec_placement_path "$file"
   fi
+
+  case "$file" in
+  *.json | *.yaml | *.yml)
+    if just_is_openapi_file "$file"; then
+      add_openapi_lint_file "$file"
+    fi
+    ;;
+  esac
 
   case "$file" in
   *.ex | *.exs | *.heex)
@@ -272,6 +308,12 @@ unique_spec_placement_paths() {
   [[ "${#SPEC_PLACEMENT_PATHS[@]}" -gt 0 ]] || return 0
 
   printf "%s\n" "${SPEC_PLACEMENT_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
+unique_openapi_lint_files() {
+  [[ "${#OPENAPI_LINT_FILES[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${OPENAPI_LINT_FILES[@]}" | awk 'NF && !seen[$0]++'
 }
 
 unique_mix_lint_roots() {
@@ -512,8 +554,15 @@ record_spec_placement_config_report() {
   record_lint_config "info" "configured spec placement: docs/"
 }
 
+record_openapi_lint_config_report() {
+  [[ "${#OPENAPI_LINT_FILES[@]}" -gt 0 ]] || return 0
+
+  record_lint_config "info" "configured OpenAPI lint: vacuum"
+}
+
 record_lint_config_report() {
   record_spec_placement_config_report
+  record_openapi_lint_config_report
   record_oxlint_config_report
   record_ruff_config_report
   record_stylelint_config_report
@@ -591,6 +640,27 @@ run_spec_placement() {
 
   target="$(printf "%s\n" "${paths[@]}" | while IFS= read -r path; do relative_path "$path"; done | paste -sd ' ' -)"
   collect_lint_step "Spec Placement" "$REPO_ROOT" "$display_command" "docs/" "$target" check_spec_placement "${paths[@]}"
+}
+
+run_openapi_lint() {
+  local file
+  local display_command
+  local relative_file
+  local -a files=()
+
+  while IFS= read -r file; do
+    files+=("$file")
+  done < <(unique_openapi_lint_files)
+
+  [[ "${#files[@]}" -gt 0 ]] || return 0
+
+  require_command vacuum
+
+  for file in "${files[@]}"; do
+    relative_file="$(relative_path "$file")"
+    display_command="$(command_string vacuum lint "$relative_file")"
+    collect_lint_step "OpenAPI" "$REPO_ROOT" "$display_command" "openapi" "$relative_file" vacuum lint "$file"
+  done
 }
 
 run_oxlint() {
@@ -852,13 +922,14 @@ main() {
     add_default_lint_targets
   fi
 
-  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_RUFF" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "$RUN_SPEC_PLACEMENT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#SPEC_PLACEMENT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_RUFF" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "$RUN_SPEC_PLACEMENT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#SPEC_PLACEMENT_PATHS[@]}" -eq 0 && "${#OPENAPI_LINT_FILES[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
     printf "No lint-compatible files selected.\n"
     return
   fi
 
   record_lint_config_report
   run_spec_placement
+  run_openapi_lint
   run_mix_lint
   run_oxlint
   run_ruff_lint

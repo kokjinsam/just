@@ -6,9 +6,9 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
 trap - EXIT
 
 declare -a CHECK_FILES=()
-declare -a OPENAPI_FILES=()
 declare -a TYPECHECK_ROOTS=()
 declare -a PYREFLY_PATHS=()
+declare -a DIALYZER_ROOTS=()
 declare -a CHECK_CONFIG_LEVELS=()
 declare -a CHECK_CONFIG_MESSAGES=()
 declare -a CHECK_OPERATION_LEVELS=()
@@ -25,18 +25,7 @@ add_file() {
   *.tla | *.cfg | *.als)
     CHECK_FILES+=("$file")
     ;;
-  *.json | *.yaml | *.yml)
-    if is_openapi_file "$file"; then
-      OPENAPI_FILES+=("$file")
-    fi
-    ;;
   esac
-}
-
-is_openapi_file() {
-  local file="$1"
-
-  grep -Eq '(^[[:space:]]*(openapi|swagger)[[:space:]]*:)|("[[:space:]]*(openapi|swagger)[[:space:]]*"[[:space:]]*:)' "$file"
 }
 
 collect_path() {
@@ -61,16 +50,6 @@ unique_files() {
   [[ "${#CHECK_FILES[@]}" -gt 0 ]] || return 0
 
   printf "%s\n" "${CHECK_FILES[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
-    [[ -n "$file" ]] && printf "%s\n" "$file"
-  done
-}
-
-unique_openapi_files() {
-  local file
-
-  [[ "${#OPENAPI_FILES[@]}" -gt 0 ]] || return 0
-
-  printf "%s\n" "${OPENAPI_FILES[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
     [[ -n "$file" ]] && printf "%s\n" "$file"
   done
 }
@@ -208,6 +187,35 @@ collect_type_path() {
   fi
 }
 
+add_dialyzer_root() {
+  local root="$1"
+
+  [[ -f "$root/mix.exs" ]] && DIALYZER_ROOTS+=("$root")
+}
+
+collect_dialyzer_path() {
+  local selector="$1"
+  local path
+  local root
+
+  path="$(resolve_path "$selector")"
+  [[ -e "$path" ]] || die "path does not exist: $path"
+
+  if [[ "$path" == "$REPO_ROOT" ]]; then
+    while read -r _app root; do
+      add_dialyzer_root "$root"
+    done < <(elixir_roots)
+
+    return
+  fi
+
+  if root="$(elixir_root_for_path "$path")"; then
+    add_dialyzer_root "$root"
+  else
+    printf "No Dialyzer target matched %s\n" "$(relative_path "$path")" >&2
+  fi
+}
+
 unique_typecheck_roots() {
   local root
 
@@ -221,6 +229,14 @@ unique_pyrefly_paths() {
 
   printf "%s\n" "${PYREFLY_PATHS[@]}" | awk '!seen[$0]++' | while IFS= read -r path; do
     [[ -n "$path" ]] && printf "%s\n" "$path"
+  done
+}
+
+unique_dialyzer_roots() {
+  local root
+
+  printf "%s\n" "${DIALYZER_ROOTS[@]}" | awk '!seen[$0]++' | while IFS= read -r root; do
+    [[ -n "$root" ]] && printf "%s\n" "$root"
   done
 }
 
@@ -379,25 +395,11 @@ check_alloy_model() {
 
 collect_default_specs() {
   local path
-  local saw_path=0
 
-  for path in "$REPO_ROOT/docs" "$REPO_ROOT/openapi"; do
-    if [[ -d "$path" ]]; then
-      saw_path=1
-      collect_path "$path"
-    fi
-  done
+  path="$REPO_ROOT/docs"
+  [[ -d "$path" ]] || die "docs directory does not exist"
 
-  [[ "$saw_path" -eq 1 ]] || die "docs or openapi directory does not exist"
-}
-
-check_openapi_spec() {
-  local file="$1"
-  local display_command
-
-  require_command vacuum
-  display_command="$(command_string vacuum lint "$(relative_path "$file")")"
-  collect_check_step "OpenAPI" "$REPO_ROOT" "$display_command" "openapi" "$(relative_path "$file")" vacuum lint "$file"
+  collect_path "$path"
 }
 
 check_specs() {
@@ -413,8 +415,8 @@ check_specs() {
     done
   fi
 
-  if [[ "${#CHECK_FILES[@]}" -eq 0 && "${#OPENAPI_FILES[@]}" -eq 0 ]]; then
-    printf "No .tla, .cfg, .als, or OpenAPI files found.\n"
+  if [[ "${#CHECK_FILES[@]}" -eq 0 ]]; then
+    printf "No .tla, .cfg, or .als files found.\n"
     return
   fi
 
@@ -442,16 +444,11 @@ check_specs() {
     esac
   done < <(unique_files)
 
-  while IFS= read -r file; do
-    saw_file=1
-    check_openapi_spec "$file"
-  done < <(unique_openapi_files)
-
   if [[ "$saw_file" -eq 1 ]]; then
     print_check_summary
     fail_if_steps_failed
   else
-    printf "No .tla, .cfg, .als, or OpenAPI files found.\n"
+    printf "No .tla, .cfg, or .als files found.\n"
   fi
 }
 
@@ -511,6 +508,36 @@ check_types() {
   fi
 }
 
+check_dialyzer() {
+  local path
+  local root
+  local saw_root=0
+
+  if [[ "$#" -eq 0 ]]; then
+    while read -r _app root; do
+      add_dialyzer_root "$root"
+    done < <(elixir_roots)
+  else
+    for path in "$@"; do
+      collect_dialyzer_path "$path"
+    done
+  fi
+
+  while IFS= read -r root; do
+    saw_root=1
+    require_command mix
+    record_check_config "info" "configured dialyzer: $(relative_path "$root/mix.exs")"
+    collect_check_step "Dialyzer" "$root" "mix dialyzer --format short" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix dialyzer --format short
+  done < <(unique_dialyzer_roots)
+
+  if [[ "$saw_root" -eq 1 ]]; then
+    print_check_summary
+    fail_if_steps_failed
+  else
+    printf "No Dialyzer checks selected.\n"
+  fi
+}
+
 check_knip() {
   [[ "$#" -eq 0 ]] || die "just check knip does not accept paths"
 
@@ -531,12 +558,16 @@ main() {
     shift
     check_types "$@"
     ;;
+  dialyzer)
+    shift
+    check_dialyzer "$@"
+    ;;
   knip)
     shift
     check_knip "$@"
     ;;
   *)
-    die "unknown check target: ${1:-}; use 'just check specs [PATH...]', 'just check types [PATH...]', or 'just check knip'"
+    die "unknown check target: ${1:-}; use 'just check specs [PATH...]', 'just check types [PATH...]', 'just check dialyzer [PATH...]', or 'just check knip'"
     ;;
   esac
 }

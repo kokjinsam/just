@@ -25,8 +25,9 @@ Update:
   just update recipes                  Refresh the managed just recipes
 
 Check:
-  just check specs [PATH...]           Check TLA+, Alloy, and OpenAPI specs
+  just check specs [PATH...]           Check TLA+ and Alloy specs
   just check types [PATH...]           Typecheck TypeScript apps and Python paths
+  just check dialyzer [PATH...]        Run Dialyzer for Elixir apps
   just check knip                      Check unused files, dependencies, and exports
 
 Test:
@@ -44,7 +45,7 @@ Dev:
   just dev --dry-run                   Validate process-compose.yaml without starting servers
 
 Lint:
-  just lint [PATH...]                  Lint code paths and enforce spec placement
+  just lint [PATH...]                  Lint code, OpenAPI specs, and spec placement
 
 Format:
   just format [PATH...]                Format configured JS, CSS, Python, Elixir, and TLA+ paths
