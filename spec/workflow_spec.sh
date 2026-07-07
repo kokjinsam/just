@@ -41,6 +41,11 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "formats directory selections through git-aware discovery"
+    When call test_format_directory_discovery_uses_gitignore
+    The status should equal 0
+  End
+
   It "reports missing default formatter configs as skips"
     When call test_default_format_missing_configs_skips_without_failure
     The status should equal 0
@@ -71,6 +76,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "lints directory selections through git-aware discovery"
+    When call test_lint_directory_discovery_uses_gitignore
+    The status should equal 0
+  End
+
+  It "lints explicit ignored file selectors"
+    When call test_lint_explicit_ignored_file_selector_wins
+    The status should equal 0
+  End
+
   It "reports lint preflight failures and continues"
     When call test_lint_preflight_failure_reports_and_continues
     The status should equal 0
@@ -98,6 +113,11 @@ Describe "workflow scripts"
 
   It "checks formal specs through asdf shims"
     When call test_check_specs_uses_asdf_shims
+    The status should equal 0
+  End
+
+  It "checks spec directory selections through git-aware discovery"
+    When call test_check_specs_directory_discovery_uses_gitignore
     The status should equal 0
   End
 

@@ -170,8 +170,12 @@ add_non_elixir_format_path() {
   fi
 
   while IFS= read -r -d '' file; do
-    add_ruff_path "$file"
-  done < <(find "$path" -type f \( -name '*.py' -o -name '*.pyi' \) -print0)
+    case "$file" in
+    *.py | *.pyi)
+      add_ruff_path "$file"
+      ;;
+    esac
+  done < <(discover_project_files "$path")
 
   add_oxfmt_path "$path"
 }
@@ -247,20 +251,7 @@ add_elixir_format_path() {
 
   while IFS= read -r -d '' file; do
     add_elixir_format_file "$root" "$file"
-  done < <(
-    find "$path" \
-      \( \
-      -path "$root/_build" -o \
-      -path "$root/_build/*" -o \
-      -path "$root/deps" -o \
-      -path "$root/deps/*" -o \
-      -path "$root/assets/node_modules" -o \
-      -path "$root/assets/node_modules/*" -o \
-      -path "$root/priv/static/assets" -o \
-      -path "$root/priv/static/assets/*" \
-      \) -prune \
-      -o -type f \( -name '*.css' -o -name '*.ex' -o -name '*.exs' -o -name '*.heex' \) -print0
-  )
+  done < <(discover_project_files "$path")
 }
 
 unique_oxfmt_paths() {

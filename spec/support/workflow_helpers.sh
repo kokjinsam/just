@@ -507,6 +507,10 @@ exit "${JUST_FAKE_ALLOY_STATUS:-0}"
   printf "%s\n" "$fixture"
 }
 
+init_git_fixture() {
+  git -C "$1" init --quiet
+}
+
 run_wrapper() {
   local __status_var="$1"
   local __output_var="$2"
@@ -709,6 +713,27 @@ test_path_selected_python_without_config_skips_ruff() {
   assert_log_not_contains "$fixture" "ruff" || return
 }
 
+test_format_directory_discovery_uses_gitignore() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  init_git_fixture "$fixture"
+  mkdir -p "$fixture/apps/api/assets/css/generated"
+  printf "generated/\n" >"$fixture/apps/api/assets/css/.gitignore"
+  printf "body { color: red; }\n" >"$fixture/apps/api/assets/css/generated/ignored.css"
+  printf "body { color: green; }\n" >"$fixture/apps/api/assets/css/generated/tracked.css"
+  git -C "$fixture" add -f apps/api/assets/css/generated/tracked.css
+
+  run_wrapper status output "$fixture" "$fixture" format --check apps/api
+
+  assert_status 0 "$status" "$output" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/assets/css/app.css" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/assets/css/generated/tracked.css" || return
+  assert_log_not_contains "$fixture" "apps/api/assets/css/generated/ignored.css" || return
+}
+
 test_default_format_missing_configs_skips_without_failure() {
   local fixture
   local output
@@ -824,6 +849,45 @@ test_lint_accepts_end_of_options_path() {
   assert_status 0 "$status" "$output" || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint ./-x.js || return
   assert_output_not_contains "$output" "path does not exist" || return
+}
+
+test_lint_directory_discovery_uses_gitignore() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  init_git_fixture "$fixture"
+  mkdir -p "$fixture/apps/workspace/src/generated"
+  printf "generated/\n" >"$fixture/apps/workspace/src/.gitignore"
+  printf "export const ignored = 1\n" >"$fixture/apps/workspace/src/generated/ignored.ts"
+  printf "export const tracked = 1\n" >"$fixture/apps/workspace/src/generated/tracked.ts"
+  git -C "$fixture" add -f apps/workspace/src/generated/tracked.ts
+
+  run_wrapper status output "$fixture" "$fixture" lint apps/workspace/src
+
+  assert_status 0 "$status" "$output" || return
+  assert_file_contains "$fixture/fake.log" "apps/workspace/src/main.tsx" || return
+  assert_file_contains "$fixture/fake.log" "apps/workspace/src/secondary.ts" || return
+  assert_file_contains "$fixture/fake.log" "apps/workspace/src/generated/tracked.ts" || return
+  assert_log_not_contains "$fixture" "apps/workspace/src/generated/ignored.ts" || return
+}
+
+test_lint_explicit_ignored_file_selector_wins() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  init_git_fixture "$fixture"
+  mkdir -p "$fixture/apps/workspace/src/generated"
+  printf "generated/\n" >"$fixture/apps/workspace/src/.gitignore"
+  printf "export const ignored = 1\n" >"$fixture/apps/workspace/src/generated/ignored.ts"
+
+  run_wrapper status output "$fixture" "$fixture" lint apps/workspace/src/generated/ignored.ts
+
+  assert_status 0 "$status" "$output" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/generated/ignored.ts || return
 }
 
 test_lint_preflight_failure_reports_and_continues() {
@@ -947,6 +1011,28 @@ TLA
   assert_log_entry "$fixture" sany "$fixture" docs/specs/Example.tla || return
   assert_log_entry "$fixture" tlc "$fixture" -config docs/specs/Example.cfg docs/specs/Example.tla || return
   assert_log_entry "$fixture" alloy "$fixture" commands docs/specs/Structure.als || return
+}
+
+test_check_specs_directory_discovery_uses_gitignore() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  init_git_fixture "$fixture"
+  mkdir -p "$fixture/docs/specs/generated"
+  printf "generated/\n" >"$fixture/docs/specs/.gitignore"
+  printf -- "---- MODULE Included ----\n====\n" >"$fixture/docs/specs/Included.tla"
+  printf -- "---- MODULE Ignored ----\n====\n" >"$fixture/docs/specs/generated/Ignored.tla"
+  printf -- "---- MODULE Tracked ----\n====\n" >"$fixture/docs/specs/generated/Tracked.tla"
+  git -C "$fixture" add -f docs/specs/generated/Tracked.tla
+
+  run_wrapper status output "$fixture" "$fixture" check specs docs/specs
+
+  assert_status 0 "$status" "$output" || return
+  assert_file_contains "$fixture/fake.log" "docs/specs/Included.tla" || return
+  assert_file_contains "$fixture/fake.log" "docs/specs/generated/Tracked.tla" || return
+  assert_log_not_contains "$fixture" "docs/specs/generated/Ignored.tla" || return
 }
 
 test_check_types_uses_compact_summary() {

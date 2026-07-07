@@ -160,16 +160,17 @@ add_ruff_lint_path() {
 
 has_mix_lint_files() {
   local path="$1"
+  local file
 
-  find "$path" \
-    \( \
-    -path '*/_build' -o \
-    -path '*/_build/*' -o \
-    -path '*/deps' -o \
-    -path '*/deps/*' \
-    \) -prune \
-    -o -type f \( -name '*.ex' -o -name '*.exs' -o -name '*.heex' \) -print -quit |
-    grep -q .
+  while IFS= read -r -d '' file; do
+    case "$file" in
+    *.ex | *.exs | *.heex)
+      return 0
+      ;;
+    esac
+  done < <(discover_project_files "$path")
+
+  return 1
 }
 
 add_lint_file() {
@@ -226,41 +227,7 @@ add_lint_path() {
 
     while IFS= read -r -d '' file; do
       add_lint_file "$file"
-    done < <(
-      find "$path" \
-        \( \
-        -path '*/.astro' -o \
-        -path '*/.astro/*' -o \
-        -path '*/.tanstack' -o \
-        -path '*/.tanstack/*' -o \
-        -path '*/.vite' -o \
-        -path '*/.vite/*' -o \
-        -path '*/_build' -o \
-        -path '*/_build/*' -o \
-        -path '*/deps' -o \
-        -path '*/deps/*' -o \
-        -path '*/dist' -o \
-        -path '*/dist/*' -o \
-        -path '*/node_modules' -o \
-        -path '*/node_modules/*' -o \
-        -path '*/priv/static/assets' -o \
-        -path '*/priv/static/assets/*' \
-        \) -prune \
-        -o -type f \( \
-        -name '*.astro' -o \
-        -name '*.css' -o \
-        -name '*.cjs' -o \
-        -name '*.cts' -o \
-        -name '*.js' -o \
-        -name '*.jsx' -o \
-        -name '*.mjs' -o \
-        -name '*.mts' -o \
-        -name '*.py' -o \
-        -name '*.pyi' -o \
-        -name '*.ts' -o \
-        -name '*.tsx' \
-        \) -print0
-    )
+    done < <(discover_project_files "$path")
     return
   fi
 

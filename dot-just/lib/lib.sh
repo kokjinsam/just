@@ -307,6 +307,44 @@ relative_path() {
   fi
 }
 
+path_is_under_repo_root() {
+  local path="$1"
+
+  [[ "$path" == "$REPO_ROOT" || "$path" == "$REPO_ROOT/"* ]]
+}
+
+git_worktree_available() {
+  git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+discover_project_files() {
+  local path="$1"
+  local relative
+  local file
+
+  if [[ -f "$path" ]]; then
+    printf "%s\0" "$path"
+    return
+  fi
+
+  if [[ ! -d "$path" ]]; then
+    return
+  fi
+
+  if path_is_under_repo_root "$path" && git_worktree_available; then
+    relative="$(relative_path "$path")"
+
+    git -C "$REPO_ROOT" ls-files -z --cached --others --exclude-standard -- "$relative" |
+      while IFS= read -r -d '' file; do
+        printf "%s/%s\0" "$REPO_ROOT" "$file"
+      done
+
+    return
+  fi
+
+  find "$path" -type f -print0
+}
+
 yaml_app_entries() {
   require_config
 

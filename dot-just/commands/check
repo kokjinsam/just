@@ -45,16 +45,7 @@ collect_path() {
   if [[ -d "$path" ]]; then
     while IFS= read -r -d '' file; do
       add_file "$file"
-    done < <(
-      find "$path" -type f \( \
-        -name '*.tla' -o \
-        -name '*.cfg' -o \
-        -name '*.als' -o \
-        -name '*.json' -o \
-        -name '*.yaml' -o \
-        -name '*.yml' \
-        \) -print0
-    )
+    done < <(discover_project_files "$path")
   elif [[ -f "$path" ]]; then
     add_file "$path"
   else
