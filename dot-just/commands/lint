@@ -3,40 +3,111 @@ set -euo pipefail
 
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+trap - EXIT
 
 declare -a OXLINT_PATHS=()
+declare -a RUFF_LINT_PATHS=()
 declare -a STYLELINT_PATHS=()
 declare -a LINT_SELECTORS=()
 declare -a MIX_LINT_ROOTS=()
+declare -a LINT_CONFIG_LEVELS=()
+declare -a LINT_CONFIG_MESSAGES=()
+declare -a LINT_OPERATION_LEVELS=()
+declare -a LINT_OPERATION_PREFIXES=()
+declare -a LINT_OPERATION_COMMANDS=()
+declare -a LINT_OPERATION_CONFIGS=()
+declare -a LINT_OPERATION_TARGETS=()
 RUN_DEFAULT_OXLINT=0
+RUN_DEFAULT_RUFF=0
 RUN_DEFAULT_STYLELINT=0
 
-export JUST_STEP_REPORT_STYLE="lint-table"
+oxlint_config() {
+  local config
 
-has_oxlint_config() {
-  [[ -f "$REPO_ROOT/oxlint.config.js" ]] ||
-    [[ -f "$REPO_ROOT/oxlint.config.cjs" ]] ||
-    [[ -f "$REPO_ROOT/oxlint.config.mjs" ]] ||
-    [[ -f "$REPO_ROOT/oxlint.config.ts" ]]
+  for config in oxlint.config.js oxlint.config.cjs oxlint.config.mjs oxlint.config.ts; do
+    if [[ -f "$REPO_ROOT/$config" ]]; then
+      printf "%s\n" "$REPO_ROOT/$config"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
-has_stylelint_config() {
-  [[ -f "$REPO_ROOT/stylelint.config.js" ]] ||
-    [[ -f "$REPO_ROOT/stylelint.config.cjs" ]] ||
-    [[ -f "$REPO_ROOT/stylelint.config.mjs" ]] ||
-    [[ -f "$REPO_ROOT/stylelint.config.ts" ]]
+stylelint_config() {
+  local config
+
+  for config in stylelint.config.js stylelint.config.cjs stylelint.config.mjs stylelint.config.ts; do
+    if [[ -f "$REPO_ROOT/$config" ]]; then
+      printf "%s\n" "$REPO_ROOT/$config"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+toml_has_ruff_config() {
+  grep -Eq '^[[:space:]]*\[tool\.ruff([.]|])' "$1"
+}
+
+root_ruff_config() {
+  if [[ -f "$REPO_ROOT/ruff.toml" ]]; then
+    printf "%s\n" "$REPO_ROOT/ruff.toml"
+  elif [[ -f "$REPO_ROOT/.ruff.toml" ]]; then
+    printf "%s\n" "$REPO_ROOT/.ruff.toml"
+  elif [[ -f "$REPO_ROOT/pyproject.toml" ]] && toml_has_ruff_config "$REPO_ROOT/pyproject.toml"; then
+    printf "%s\n" "$REPO_ROOT/pyproject.toml"
+  else
+    return 1
+  fi
+}
+
+absolute_selected_path() {
+  local path="$1"
+
+  if [[ "$path" = /* ]]; then
+    printf "%s\n" "$path"
+  else
+    printf "%s/%s\n" "$REPO_ROOT" "$path"
+  fi
+}
+
+ruff_config_for_path() {
+  local path="$1"
+  local dir
+
+  if [[ -d "$path" ]]; then
+    dir="$path"
+  else
+    dir="$(dirname "$path")"
+  fi
+
+  while [[ "$dir" == "$REPO_ROOT" || "$dir" == "$REPO_ROOT/"* ]]; do
+    if [[ -f "$dir/ruff.toml" ]]; then
+      printf "%s\n" "$dir/ruff.toml"
+      return 0
+    elif [[ -f "$dir/.ruff.toml" ]]; then
+      printf "%s\n" "$dir/.ruff.toml"
+      return 0
+    elif [[ -f "$dir/pyproject.toml" ]] && toml_has_ruff_config "$dir/pyproject.toml"; then
+      printf "%s\n" "$dir/pyproject.toml"
+      return 0
+    fi
+
+    [[ "$dir" != "$REPO_ROOT" ]] || break
+    dir="$(dirname "$dir")"
+  done
+
+  return 1
 }
 
 add_default_lint_targets() {
   local root
 
-  if has_oxlint_config; then
-    RUN_DEFAULT_OXLINT=1
-  fi
-
-  if has_stylelint_config; then
-    RUN_DEFAULT_STYLELINT=1
-  fi
+  RUN_DEFAULT_OXLINT=1
+  RUN_DEFAULT_RUFF=1
+  RUN_DEFAULT_STYLELINT=1
 
   while read -r _app root; do
     add_mix_lint_root "$root"
@@ -81,6 +152,12 @@ add_mix_lint_root() {
   MIX_LINT_ROOTS+=("$root")
 }
 
+add_ruff_lint_path() {
+  local path="$1"
+
+  RUFF_LINT_PATHS+=("$(lint_tool_path "$path")")
+}
+
 has_mix_lint_files() {
   local path="$1"
 
@@ -104,13 +181,13 @@ add_lint_file() {
     root="$(elixir_root_for_path "$file")" || return 0
     add_mix_lint_root "$root"
     ;;
+  *.py | *.pyi)
+    add_ruff_lint_path "$file"
+    ;;
   *.css)
     STYLELINT_PATHS+=("$(lint_tool_path "$file")")
     ;;
   *.astro | *.cjs | *.cts | *.js | *.jsx | *.mjs | *.mts | *.ts | *.tsx)
-    OXLINT_PATHS+=("$(lint_tool_path "$file")")
-    ;;
-  *)
     OXLINT_PATHS+=("$(lint_tool_path "$file")")
     ;;
   esac
@@ -178,6 +255,8 @@ add_lint_path() {
         -name '*.jsx' -o \
         -name '*.mjs' -o \
         -name '*.mts' -o \
+        -name '*.py' -o \
+        -name '*.pyi' -o \
         -name '*.ts' -o \
         -name '*.tsx' \
         \) -print0
@@ -197,6 +276,12 @@ unique_oxlint_paths() {
   printf "%s\n" "${OXLINT_PATHS[@]}" | awk 'NF && !seen[$0]++'
 }
 
+unique_ruff_lint_paths() {
+  [[ "${#RUFF_LINT_PATHS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${RUFF_LINT_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
 unique_stylelint_paths() {
   [[ "${#STYLELINT_PATHS[@]}" -gt 0 ]] || return 0
 
@@ -207,50 +292,6 @@ unique_mix_lint_roots() {
   [[ "${#MIX_LINT_ROOTS[@]}" -gt 0 ]] || return 0
 
   printf "%s\n" "${MIX_LINT_ROOTS[@]}" | awk 'NF && !seen[$0]++'
-}
-
-selector_summary() {
-  printf "%s\n" "${LINT_SELECTORS[@]}" | awk 'NF && !seen[$0]++' | paste -sd ' ' -
-}
-
-selector_display_suffix() {
-  if [[ "${#LINT_SELECTORS[@]}" -gt 0 ]]; then
-    printf " %s" "$(selector_summary)"
-  fi
-}
-
-lint_files_summary() {
-  local count="$1"
-  local label
-  local unit="files"
-
-  if [[ "${#LINT_SELECTORS[@]}" -eq 0 ]]; then
-    label="repo defaults"
-  else
-    label="$(selector_summary)"
-  fi
-
-  [[ "$count" -eq 1 ]] && unit="file"
-  printf "%s (%s %s)" "$label" "$count" "$unit"
-}
-
-default_lint_files_summary() {
-  printf "repo defaults (tool config)"
-}
-
-lint_summary_details() {
-  local count="$1"
-
-  printf "  files: %s" "$(lint_files_summary "$count")"
-}
-
-lint_tool_step() {
-  local label="$1"
-  local cwd="$2"
-  local files="$3"
-
-  shift 3
-  JUST_STEP_REPORT_KIND="tool" JUST_STEP_REPORT_EXTRA="$files" collect_step "$label" "$cwd" "$@"
 }
 
 file_contains_uncommented_regex() {
@@ -274,30 +315,253 @@ file_contains_uncommented_regex() {
   ' "$file"
 }
 
+lint_config_display() {
+  relative_path "$1"
+}
+
+lint_paths_summary() {
+  local path
+  local separator=""
+
+  for path in "$@"; do
+    printf "%s%s" "$separator" "$path"
+    separator=" "
+  done
+}
+
+record_lint_config() {
+  local level="$1"
+  local message="$2"
+
+  LINT_CONFIG_LEVELS+=("$level")
+  LINT_CONFIG_MESSAGES+=("$message")
+}
+
+record_lint_operation() {
+  local level="$1"
+  local prefix="$2"
+  local command="$3"
+  local config="$4"
+  local target="$5"
+
+  LINT_OPERATION_LEVELS+=("$level")
+  LINT_OPERATION_PREFIXES+=("$prefix")
+  LINT_OPERATION_COMMANDS+=("$command")
+  LINT_OPERATION_CONFIGS+=("$config")
+  LINT_OPERATION_TARGETS+=("$target")
+}
+
+record_skipped_lint_operation() {
+  local command="$1"
+  local target="$2"
+
+  record_lint_operation "warning" "skipped" "$command" "no config" "$target"
+}
+
+last_step_status() {
+  local count
+  local index
+
+  count="${#JUST_STEP_STATUSES[@]}"
+  [[ "$count" -gt 0 ]] || printf "0\n"
+  [[ "$count" -gt 0 ]] || return 0
+
+  index="$((count - 1))"
+  printf "%s\n" "${JUST_STEP_STATUSES[$index]}"
+}
+
+collect_lint_step() {
+  local label="$1"
+  local cwd="$2"
+  local display_command="$3"
+  local config="$4"
+  local target="$5"
+  local status
+  local level
+
+  shift 5
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$cwd" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
+  else
+    level="error"
+  fi
+
+  record_lint_operation "$level" "" "$display_command" "$config" "$target"
+}
+
+print_lint_summary() {
+  local index
+  local prefix
+  local total_configs="${#LINT_CONFIG_LEVELS[@]}"
+  local total_operations="${#LINT_OPERATION_LEVELS[@]}"
+
+  printf "\n== Summary ==\n\n"
+
+  if [[ "$total_configs" -gt 0 ]]; then
+    for ((index = 0; index < total_configs; index++)); do
+      printf "[%s] %s\n" "${LINT_CONFIG_LEVELS[$index]}" "${LINT_CONFIG_MESSAGES[$index]}"
+    done
+  fi
+
+  if [[ "$total_configs" -gt 0 && "$total_operations" -gt 0 ]]; then
+    printf "\n"
+  fi
+
+  if [[ "$total_operations" -gt 0 ]]; then
+    for ((index = 0; index < total_operations; index++)); do
+      prefix="${LINT_OPERATION_PREFIXES[$index]}"
+
+      if [[ -n "$prefix" ]]; then
+        printf "[%s] [%s] [%s] [%s] %s\n" \
+          "${LINT_OPERATION_LEVELS[$index]}" \
+          "$prefix" \
+          "${LINT_OPERATION_COMMANDS[$index]}" \
+          "${LINT_OPERATION_CONFIGS[$index]}" \
+          "${LINT_OPERATION_TARGETS[$index]}"
+      else
+        printf "[%s] [%s] [%s] %s\n" \
+          "${LINT_OPERATION_LEVELS[$index]}" \
+          "${LINT_OPERATION_COMMANDS[$index]}" \
+          "${LINT_OPERATION_CONFIGS[$index]}" \
+          "${LINT_OPERATION_TARGETS[$index]}"
+      fi
+    done
+  fi
+}
+
+record_oxlint_config_report() {
+  local config
+
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if config="$(oxlint_config)"; then
+    record_lint_config "info" "configured oxlint: $(lint_config_display "$config")"
+  else
+    record_lint_config "warning" "unconfigured oxlint: no oxlint.config.js, .cjs, .mjs, or .ts found"
+  fi
+}
+
+record_ruff_config_report() {
+  local config
+  local path
+  local -a configs=()
+  local -a missing_paths=()
+
+  if [[ "$RUN_DEFAULT_RUFF" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if [[ "$RUN_DEFAULT_RUFF" -eq 1 ]]; then
+    if config="$(root_ruff_config)"; then
+      configs+=("$config")
+    else
+      record_lint_config "warning" "unconfigured ruff: no ruff.toml, .ruff.toml, or pyproject.toml config found"
+    fi
+  fi
+
+  while IFS= read -r path; do
+    if config="$(ruff_config_for_path "$(absolute_selected_path "$path")")"; then
+      configs+=("$config")
+    else
+      missing_paths+=("$path")
+    fi
+  done < <(unique_ruff_lint_paths)
+
+  if [[ "${#configs[@]}" -gt 0 ]]; then
+    while IFS= read -r config; do
+      record_lint_config "info" "configured ruff: $(lint_config_display "$config")"
+    done < <(printf "%s\n" "${configs[@]}" | awk 'NF && !seen[$0]++')
+  fi
+
+  if [[ "${#missing_paths[@]}" -gt 0 ]]; then
+    for path in "${missing_paths[@]}"; do
+      record_lint_config "warning" "unconfigured ruff: no config found for $path"
+    done
+  fi
+}
+
+record_stylelint_config_report() {
+  local config
+
+  if [[ "$RUN_DEFAULT_STYLELINT" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if config="$(stylelint_config)"; then
+    record_lint_config "info" "configured stylelint: $(lint_config_display "$config")"
+  else
+    record_lint_config "warning" "unconfigured stylelint: no stylelint.config.js, .cjs, .mjs, or .ts found"
+  fi
+}
+
+record_mix_lint_config_report() {
+  local root
+
+  while IFS= read -r root; do
+    if [[ -f "$root/.formatter.exs" ]]; then
+      record_lint_config "info" "configured mix format: $(relative_path "$root/.formatter.exs")"
+    else
+      record_lint_config "warning" "unconfigured mix format: no .formatter.exs found for $(relative_path "$root")"
+    fi
+
+    if [[ -f "$root/.credo.exs" ]]; then
+      record_lint_config "info" "configured credo: $(relative_path "$root/.credo.exs")"
+    else
+      record_lint_config "warning" "unconfigured credo: no .credo.exs found for $(relative_path "$root")"
+    fi
+  done < <(unique_mix_lint_roots)
+}
+
+record_lint_config_report() {
+  record_oxlint_config_report
+  record_ruff_config_report
+  record_stylelint_config_report
+  record_mix_lint_config_report
+}
+
 preflight_step() {
   local label="$1"
   local root="$2"
   local requirement="$3"
   local display_command="$4"
+  local config="$5"
+  local status
+  local level
 
-  shift 4
-  JUST_STEP_REPORT_KIND="preflight" \
-    JUST_STEP_REPORT_EXTRA="$requirement" \
-    JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    JUST_STEP_DISPLAY_DETAILS="  requires: $requirement" \
-    collect_step "$label" "$root" "$@"
+  shift 5
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$root" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
+  else
+    level="error"
+  fi
+
+  record_lint_operation "$level" "" "check $label" "$config" "$requirement"
 }
 
 run_oxlint() {
+  local config
   local path
   local -a paths=()
   local display_command
-  local details
+  local target
 
   if [[ "$RUN_DEFAULT_OXLINT" -eq 1 ]]; then
-    require_command pnpm
-    JUST_STEP_DISPLAY_DETAILS="  files: $(default_lint_files_summary)" \
-      lint_tool_step "Oxlint" "$REPO_ROOT" "$(default_lint_files_summary)" pnpm exec oxlint
+    display_command="pnpm exec oxlint"
+    if config="$(oxlint_config)"; then
+      require_command pnpm
+      collect_lint_step "Oxlint" "$REPO_ROOT" "$display_command" "$(lint_config_display "$config")" "configured files" pnpm exec oxlint
+    else
+      record_skipped_lint_operation "$display_command" "configured files"
+    fi
   fi
 
   while IFS= read -r path; do
@@ -306,23 +570,103 @@ run_oxlint() {
 
   [[ "${#paths[@]}" -gt 0 ]] || return 0
 
-  require_command pnpm
-  display_command="pnpm exec oxlint$(selector_display_suffix)"
-  details="$(lint_summary_details "${#paths[@]}")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-    lint_tool_step "Oxlint" "$REPO_ROOT" "$(lint_files_summary "${#paths[@]}")" pnpm exec oxlint "${paths[@]}"
+  target="$(lint_paths_summary "${paths[@]}")"
+  display_command="$(command_string pnpm exec oxlint "${paths[@]}")"
+  if config="$(oxlint_config)"; then
+    require_command pnpm
+    collect_lint_step "Oxlint" "$REPO_ROOT" "$display_command" "$(lint_config_display "$config")" "$target" pnpm exec oxlint "${paths[@]}"
+  else
+    record_skipped_lint_operation "$display_command" "$target"
+  fi
+}
+
+ruff_config_summary_for_paths() {
+  local path
+  local config
+  local -a configs=()
+
+  for path in "$@"; do
+    if config="$(ruff_config_for_path "$(absolute_selected_path "$path")")"; then
+      configs+=("$(lint_config_display "$config")")
+    fi
+  done
+
+  if [[ "${#configs[@]}" -eq 0 ]]; then
+    printf "no config"
+    return
+  fi
+
+  if [[ "$(printf "%s\n" "${configs[@]}" | awk 'NF && !seen[$0]++' | wc -l | tr -d ' ')" -eq 1 ]]; then
+    printf "%s\n" "${configs[0]}"
+  else
+    printf "multiple configs"
+  fi
+}
+
+run_ruff_lint() {
+  local config
+  local path
+  local -a paths=()
+  local -a runnable_paths=()
+  local -a skipped_paths=()
+  local display_command
+  local target
+
+  if [[ "$RUN_DEFAULT_RUFF" -eq 1 ]]; then
+    display_command="ruff check"
+    if config="$(root_ruff_config)"; then
+      require_command ruff
+      collect_lint_step "Ruff" "$REPO_ROOT" "$display_command" "$(lint_config_display "$config")" "configured files" ruff check
+    else
+      record_skipped_lint_operation "$display_command" "configured files"
+    fi
+  fi
+
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(unique_ruff_lint_paths)
+
+  [[ "${#paths[@]}" -gt 0 ]] || return 0
+
+  for path in "${paths[@]}"; do
+    if ruff_config_for_path "$(absolute_selected_path "$path")" >/dev/null; then
+      runnable_paths+=("$path")
+    else
+      skipped_paths+=("$path")
+    fi
+  done
+
+  if [[ "${#skipped_paths[@]}" -gt 0 ]]; then
+    for path in "${skipped_paths[@]}"; do
+      display_command="$(command_string ruff check "$path")"
+      record_skipped_lint_operation "$display_command" "$path"
+    done
+  fi
+
+  [[ "${#runnable_paths[@]}" -gt 0 ]] || return 0
+
+  target="$(lint_paths_summary "${runnable_paths[@]}")"
+  config="$(ruff_config_summary_for_paths "${runnable_paths[@]}")"
+  display_command="$(command_string ruff check "${runnable_paths[@]}")"
+  require_command ruff
+  collect_lint_step "Ruff" "$REPO_ROOT" "$display_command" "$config" "$target" ruff check "${runnable_paths[@]}"
 }
 
 run_stylelint() {
+  local config
   local path
   local -a paths=()
   local display_command
-  local details
+  local target
 
   if [[ "$RUN_DEFAULT_STYLELINT" -eq 1 ]]; then
-    require_command pnpm
-    JUST_STEP_DISPLAY_DETAILS="  files: $(default_lint_files_summary)" \
-      lint_tool_step "Stylelint" "$REPO_ROOT" "$(default_lint_files_summary)" pnpm exec stylelint .
+    display_command="pnpm exec stylelint ."
+    if config="$(stylelint_config)"; then
+      require_command pnpm
+      collect_lint_step "Stylelint" "$REPO_ROOT" "$display_command" "$(lint_config_display "$config")" "configured files" pnpm exec stylelint .
+    else
+      record_skipped_lint_operation "$display_command" "configured files"
+    fi
   fi
 
   while IFS= read -r path; do
@@ -331,11 +675,14 @@ run_stylelint() {
 
   [[ "${#paths[@]}" -gt 0 ]] || return 0
 
-  require_command pnpm
-  display_command="pnpm exec stylelint$(selector_display_suffix)"
-  details="$(lint_summary_details "${#paths[@]}")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-    lint_tool_step "Stylelint" "$REPO_ROOT" "$(lint_files_summary "${#paths[@]}")" pnpm exec stylelint "${paths[@]}"
+  target="$(lint_paths_summary "${paths[@]}")"
+  display_command="$(command_string pnpm exec stylelint "${paths[@]}")"
+  if config="$(stylelint_config)"; then
+    require_command pnpm
+    collect_lint_step "Stylelint" "$REPO_ROOT" "$display_command" "$(lint_config_display "$config")" "$target" pnpm exec stylelint "${paths[@]}"
+  else
+    record_skipped_lint_operation "$display_command" "$target"
+  fi
 }
 
 check_elixir_lint_contract() {
@@ -346,6 +693,7 @@ check_elixir_lint_contract() {
     "$root" \
     "{:ex_slop, ...} in mix.exs" \
     "grep -Eq '{[[:space:]]*:ex_slop[[:space:]]*,' mix.exs" \
+    "$(relative_path "$root/mix.exs")" \
     file_contains_uncommented_regex mix.exs '\{[[:space:]]*:ex_slop[[:space:]]*,'
 
   preflight_step \
@@ -353,6 +701,7 @@ check_elixir_lint_contract() {
     "$root" \
     "{ExSlop, ...} in .credo.exs plugins" \
     "grep -Eq '{[[:space:]]*ExSlop[[:space:]]*,' .credo.exs" \
+    "$(relative_path "$root/.credo.exs")" \
     file_contains_uncommented_regex .credo.exs '\{[[:space:]]*ExSlop[[:space:]]*,'
 
   preflight_step \
@@ -360,6 +709,7 @@ check_elixir_lint_contract() {
     "$root" \
     "{:excellent_migrations, ...} in mix.exs" \
     "grep -Eq '{[[:space:]]*:excellent_migrations[[:space:]]*,' mix.exs" \
+    "$(relative_path "$root/mix.exs")" \
     file_contains_uncommented_regex mix.exs '\{[[:space:]]*:excellent_migrations[[:space:]]*,'
 
   preflight_step \
@@ -367,6 +717,7 @@ check_elixir_lint_contract() {
     "$root" \
     "ExcellentMigrations.CredoCheck.MigrationsSafety in .credo.exs" \
     "grep -Eq 'ExcellentMigrations[.]CredoCheck[.]MigrationsSafety' .credo.exs" \
+    "$(relative_path "$root/.credo.exs")" \
     file_contains_uncommented_regex .credo.exs 'ExcellentMigrations[.]CredoCheck[.]MigrationsSafety'
 
   preflight_step \
@@ -374,6 +725,7 @@ check_elixir_lint_contract() {
     "$root" \
     "{:code_style, ...} in mix.exs" \
     "grep -Eq '{[[:space:]]*:code_style[[:space:]]*,' mix.exs" \
+    "$(relative_path "$root/mix.exs")" \
     file_contains_uncommented_regex mix.exs '\{[[:space:]]*:code_style[[:space:]]*,'
 
   preflight_step \
@@ -381,6 +733,7 @@ check_elixir_lint_contract() {
     "$root" \
     "CodeStyle.* check in .credo.exs" \
     "grep -Eq 'CodeStyle[.]' .credo.exs" \
+    "$(relative_path "$root/.credo.exs")" \
     file_contains_uncommented_regex .credo.exs 'CodeStyle[.]'
 
   preflight_step \
@@ -388,6 +741,7 @@ check_elixir_lint_contract() {
     "$root" \
     "{:styler, ...} in mix.exs" \
     "grep -Eq '{[[:space:]]*:styler[[:space:]]*,' mix.exs" \
+    "$(relative_path "$root/mix.exs")" \
     file_contains_uncommented_regex mix.exs '\{[[:space:]]*:styler[[:space:]]*,'
 
   preflight_step \
@@ -395,6 +749,7 @@ check_elixir_lint_contract() {
     "$root" \
     "Styler in .formatter.exs plugins" \
     "grep -Eq 'Styler' .formatter.exs" \
+    "$(relative_path "$root/.formatter.exs")" \
     file_contains_uncommented_regex .formatter.exs 'Styler'
 }
 
@@ -412,11 +767,11 @@ run_mix_lint() {
 
   for root in "${roots[@]}"; do
     check_elixir_lint_contract "$root"
-    lint_tool_step "Mix Format" "$root" "app" mix format --check-formatted
-    lint_tool_step "Credo" "$root" "app" mix credo --strict
-    lint_tool_step "Sobelow" "$root" "app" mix sobelow --private --exit --threshold high
-    lint_tool_step "ExDNA" "$root" "app" mix ex_dna --min-mass 40 --max-clones 0
-    lint_tool_step "Reach" "$root" "app" mix reach.check --arch --smells --strict
+    collect_lint_step "Mix Format" "$root" "mix format --check-formatted" "$(relative_path "$root/.formatter.exs")" "$(relative_path "$root")" mix format --check-formatted
+    collect_lint_step "Credo" "$root" "mix credo --strict" "$(relative_path "$root/.credo.exs")" "$(relative_path "$root")" mix credo --strict
+    collect_lint_step "Sobelow" "$root" "mix sobelow --private --exit --threshold high" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix sobelow --private --exit --threshold high
+    collect_lint_step "ExDNA" "$root" "mix ex_dna --min-mass 40 --max-clones 0" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix ex_dna --min-mass 40 --max-clones 0
+    collect_lint_step "Reach" "$root" "mix reach.check --arch --smells --strict" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix reach.check --arch --smells --strict
   done
 }
 
@@ -451,14 +806,17 @@ main() {
     add_default_lint_targets
   fi
 
-  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_RUFF" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#RUFF_LINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
     printf "No lint-compatible files selected.\n"
     return
   fi
 
+  record_lint_config_report
   run_mix_lint
   run_oxlint
+  run_ruff_lint
   run_stylelint
+  print_lint_summary
   fail_if_steps_failed
 }
 

@@ -3,10 +3,18 @@ set -euo pipefail
 
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+trap - EXIT
 
 declare -a CHECK_FILES=()
 declare -a OPENAPI_FILES=()
 declare -a TYPECHECK_ROOTS=()
+declare -a CHECK_CONFIG_LEVELS=()
+declare -a CHECK_CONFIG_MESSAGES=()
+declare -a CHECK_OPERATION_LEVELS=()
+declare -a CHECK_OPERATION_PREFIXES=()
+declare -a CHECK_OPERATION_COMMANDS=()
+declare -a CHECK_OPERATION_CONFIGS=()
+declare -a CHECK_OPERATION_TARGETS=()
 
 add_file() {
   local file="$1"
@@ -74,6 +82,22 @@ unique_openapi_files() {
   done
 }
 
+cfg_has_selected_tla_module() {
+  local cfg="$1"
+  local tla="${cfg%.cfg}.tla"
+  local file
+
+  [[ "${#CHECK_FILES[@]}" -gt 0 ]] || return 1
+
+  for file in "${CHECK_FILES[@]}"; do
+    if [[ "$file" == "$tla" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 package_has_script() {
   local root="$1"
   local script="$2"
@@ -134,6 +158,103 @@ unique_typecheck_roots() {
   done
 }
 
+record_check_config() {
+  local level="$1"
+  local message="$2"
+
+  CHECK_CONFIG_LEVELS+=("$level")
+  CHECK_CONFIG_MESSAGES+=("$message")
+}
+
+record_check_operation() {
+  local level="$1"
+  local prefix="$2"
+  local command="$3"
+  local config="$4"
+  local target="$5"
+
+  CHECK_OPERATION_LEVELS+=("$level")
+  CHECK_OPERATION_PREFIXES+=("$prefix")
+  CHECK_OPERATION_COMMANDS+=("$command")
+  CHECK_OPERATION_CONFIGS+=("$config")
+  CHECK_OPERATION_TARGETS+=("$target")
+}
+
+last_step_status() {
+  local count
+  local index
+
+  count="${#JUST_STEP_STATUSES[@]}"
+  [[ "$count" -gt 0 ]] || printf "0\n"
+  [[ "$count" -gt 0 ]] || return 0
+
+  index="$((count - 1))"
+  printf "%s\n" "${JUST_STEP_STATUSES[$index]}"
+}
+
+collect_check_step() {
+  local label="$1"
+  local cwd="$2"
+  local display_command="$3"
+  local config="$4"
+  local target="$5"
+  local status
+  local level
+
+  shift 5
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$cwd" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
+  else
+    level="error"
+  fi
+
+  record_check_operation "$level" "" "$display_command" "$config" "$target"
+}
+
+print_check_summary() {
+  local index
+  local prefix
+  local total_configs="${#CHECK_CONFIG_LEVELS[@]}"
+  local total_operations="${#CHECK_OPERATION_LEVELS[@]}"
+
+  printf "\n== Summary ==\n\n"
+
+  if [[ "$total_configs" -gt 0 ]]; then
+    for ((index = 0; index < total_configs; index++)); do
+      printf "[%s] %s\n" "${CHECK_CONFIG_LEVELS[$index]}" "${CHECK_CONFIG_MESSAGES[$index]}"
+    done
+  fi
+
+  if [[ "$total_configs" -gt 0 && "$total_operations" -gt 0 ]]; then
+    printf "\n"
+  fi
+
+  if [[ "$total_operations" -gt 0 ]]; then
+    for ((index = 0; index < total_operations; index++)); do
+      prefix="${CHECK_OPERATION_PREFIXES[$index]}"
+
+      if [[ -n "$prefix" ]]; then
+        printf "[%s] [%s] [%s] [%s] %s\n" \
+          "${CHECK_OPERATION_LEVELS[$index]}" \
+          "$prefix" \
+          "${CHECK_OPERATION_COMMANDS[$index]}" \
+          "${CHECK_OPERATION_CONFIGS[$index]}" \
+          "${CHECK_OPERATION_TARGETS[$index]}"
+      else
+        printf "[%s] [%s] [%s] %s\n" \
+          "${CHECK_OPERATION_LEVELS[$index]}" \
+          "${CHECK_OPERATION_COMMANDS[$index]}" \
+          "${CHECK_OPERATION_CONFIGS[$index]}" \
+          "${CHECK_OPERATION_TARGETS[$index]}"
+      fi
+    done
+  fi
+}
+
 require_tool_command() {
   local command="$1"
   local plugin="$2"
@@ -150,8 +271,7 @@ check_tla_module() {
   require_tool_command sany tlaplus
   relative_file="$(relative_path "$file")"
   display_command="$(command_string sany "$relative_file")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "TLA SANY" "$REPO_ROOT" sany "$relative_file"
+  collect_check_step "TLA SANY" "$REPO_ROOT" "$display_command" "tlaplus" "$relative_file" sany "$relative_file"
 }
 
 check_tla_model() {
@@ -167,8 +287,7 @@ check_tla_model() {
   relative_cfg="$(relative_path "$cfg")"
   relative_tla="$(relative_path "$tla")"
   display_command="$(command_string tlc -config "$relative_cfg" "$relative_tla")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "TLA TLC" "$REPO_ROOT" tlc -config "$relative_cfg" "$relative_tla"
+  collect_check_step "TLA TLC" "$REPO_ROOT" "$display_command" "tlaplus" "$relative_cfg" tlc -config "$relative_cfg" "$relative_tla"
 }
 
 check_alloy_model() {
@@ -179,8 +298,7 @@ check_alloy_model() {
   require_tool_command alloy alloy
   relative_file="$(relative_path "$file")"
   display_command="$(command_string alloy commands "$relative_file")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "Alloy" "$REPO_ROOT" alloy commands "$relative_file"
+  collect_check_step "Alloy" "$REPO_ROOT" "$display_command" "alloy" "$relative_file" alloy commands "$relative_file"
 }
 
 collect_default_specs() {
@@ -203,8 +321,7 @@ check_openapi_spec() {
 
   require_command vacuum
   display_command="$(command_string vacuum lint "$(relative_path "$file")")"
-  JUST_STEP_DISPLAY_COMMAND="$display_command" \
-    collect_step "OpenAPI" "$REPO_ROOT" vacuum lint "$file"
+  collect_check_step "OpenAPI" "$REPO_ROOT" "$display_command" "openapi" "$(relative_path "$file")" vacuum lint "$file"
 }
 
 check_specs() {
@@ -237,6 +354,10 @@ check_specs() {
       fi
       ;;
     *.cfg)
+      if cfg_has_selected_tla_module "$file"; then
+        continue
+      fi
+
       check_tla_model "$file"
       ;;
     *.als)
@@ -251,6 +372,7 @@ check_specs() {
   done < <(unique_openapi_files)
 
   if [[ "$saw_file" -eq 1 ]]; then
+    print_check_summary
     fail_if_steps_failed
   else
     printf "No .tla, .cfg, .als, or OpenAPI files found.\n"
@@ -274,10 +396,12 @@ check_types() {
 
   while IFS= read -r root; do
     saw_root=1
-    collect_step "Typecheck" "$root" pnpm run typecheck
+    record_check_config "info" "configured typecheck: $(relative_path "$root/package.json")"
+    collect_check_step "Typecheck" "$root" "pnpm run typecheck" "$(relative_path "$root/package.json")" "$(relative_path "$root")" pnpm run typecheck
   done < <(unique_typecheck_roots)
 
   if [[ "$saw_root" -eq 1 ]]; then
+    print_check_summary
     fail_if_steps_failed
   else
     printf "No TypeScript checks selected.\n"
@@ -287,7 +411,9 @@ check_types() {
 check_knip() {
   [[ "$#" -eq 0 ]] || die "just check knip does not accept paths"
 
-  run_step "Knip" "$REPO_ROOT" pnpm exec knip
+  collect_check_step "Knip" "$REPO_ROOT" "pnpm exec knip" "knip.json" "." pnpm exec knip
+  print_check_summary
+  fail_if_steps_failed
 }
 
 main() {

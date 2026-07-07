@@ -51,6 +51,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "lints selected Python paths with Ruff config"
+    When call test_lint_selected_python_uses_ruff_config
+    The status should equal 0
+  End
+
+  It "skips selected Python lint paths when Ruff config is missing"
+    When call test_lint_selected_python_without_config_skips_ruff
+    The status should equal 0
+  End
+
   It "runs the default lint contract for the repo-root selector"
     When call test_lint_repo_root_selector_runs_default_contract
     The status should equal 0
@@ -71,6 +81,11 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "aggregates lint results after Ruff fails"
+    When call test_lint_aggregates_after_failing_ruff
+    The status should equal 0
+  End
+
   It "aggregates formatter failures in check mode"
     When call test_format_check_aggregates_formatter_failures
     The status should equal 0
@@ -83,6 +98,16 @@ Describe "workflow scripts"
 
   It "checks formal specs through asdf shims"
     When call test_check_specs_uses_asdf_shims
+    The status should equal 0
+  End
+
+  It "checks TypeScript apps with compact summary"
+    When call test_check_types_uses_compact_summary
+    The status should equal 0
+  End
+
+  It "checks Knip with compact summary"
+    When call test_check_knip_uses_compact_summary
     The status should equal 0
   End
 

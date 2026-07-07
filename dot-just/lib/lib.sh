@@ -234,6 +234,11 @@ step_failure_count() {
   local status
   local failed=0
 
+  if [[ "${#JUST_STEP_STATUSES[@]}" -eq 0 ]]; then
+    printf "0\n"
+    return
+  fi
+
   for status in "${JUST_STEP_STATUSES[@]}"; do
     if [[ "$status" -ne 0 ]]; then
       failed="$((failed + 1))"

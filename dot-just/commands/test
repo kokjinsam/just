@@ -3,8 +3,16 @@ set -euo pipefail
 
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+trap - EXIT
 
 declare -a SELECTED_APPS=()
+declare -a TEST_CONFIG_LEVELS=()
+declare -a TEST_CONFIG_MESSAGES=()
+declare -a TEST_OPERATION_LEVELS=()
+declare -a TEST_OPERATION_PREFIXES=()
+declare -a TEST_OPERATION_COMMANDS=()
+declare -a TEST_OPERATION_CONFIGS=()
+declare -a TEST_OPERATION_TARGETS=()
 
 add_selected_app() {
   local app="$1"
@@ -46,6 +54,111 @@ unique_selected_apps() {
   printf "%s\n" "${SELECTED_APPS[@]}" | awk -F '\t' 'NF && !seen[$1 "\t" $2]++'
 }
 
+record_test_config() {
+  local level="$1"
+  local message="$2"
+
+  TEST_CONFIG_LEVELS+=("$level")
+  TEST_CONFIG_MESSAGES+=("$message")
+}
+
+record_test_operation() {
+  local level="$1"
+  local prefix="$2"
+  local command="$3"
+  local config="$4"
+  local target="$5"
+
+  TEST_OPERATION_LEVELS+=("$level")
+  TEST_OPERATION_PREFIXES+=("$prefix")
+  TEST_OPERATION_COMMANDS+=("$command")
+  TEST_OPERATION_CONFIGS+=("$config")
+  TEST_OPERATION_TARGETS+=("$target")
+}
+
+record_skipped_test_operation() {
+  local command="$1"
+  local config="$2"
+  local target="$3"
+
+  record_test_operation "warning" "skipped" "$command" "$config" "$target"
+}
+
+last_step_status() {
+  local count
+  local index
+
+  count="${#JUST_STEP_STATUSES[@]}"
+  [[ "$count" -gt 0 ]] || printf "0\n"
+  [[ "$count" -gt 0 ]] || return 0
+
+  index="$((count - 1))"
+  printf "%s\n" "${JUST_STEP_STATUSES[$index]}"
+}
+
+collect_test_step() {
+  local label="$1"
+  local cwd="$2"
+  local display_command="$3"
+  local config="$4"
+  local target="$5"
+  local status
+  local level
+
+  shift 5
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$cwd" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
+  else
+    level="error"
+  fi
+
+  record_test_operation "$level" "" "$display_command" "$config" "$target"
+}
+
+print_test_summary() {
+  local index
+  local prefix
+  local total_configs="${#TEST_CONFIG_LEVELS[@]}"
+  local total_operations="${#TEST_OPERATION_LEVELS[@]}"
+
+  printf "\n== Summary ==\n\n"
+
+  if [[ "$total_configs" -gt 0 ]]; then
+    for ((index = 0; index < total_configs; index++)); do
+      printf "[%s] %s\n" "${TEST_CONFIG_LEVELS[$index]}" "${TEST_CONFIG_MESSAGES[$index]}"
+    done
+  fi
+
+  if [[ "$total_configs" -gt 0 && "$total_operations" -gt 0 ]]; then
+    printf "\n"
+  fi
+
+  if [[ "$total_operations" -gt 0 ]]; then
+    for ((index = 0; index < total_operations; index++)); do
+      prefix="${TEST_OPERATION_PREFIXES[$index]}"
+
+      if [[ -n "$prefix" ]]; then
+        printf "[%s] [%s] [%s] [%s] %s\n" \
+          "${TEST_OPERATION_LEVELS[$index]}" \
+          "$prefix" \
+          "${TEST_OPERATION_COMMANDS[$index]}" \
+          "${TEST_OPERATION_CONFIGS[$index]}" \
+          "${TEST_OPERATION_TARGETS[$index]}"
+      else
+        printf "[%s] [%s] [%s] %s\n" \
+          "${TEST_OPERATION_LEVELS[$index]}" \
+          "${TEST_OPERATION_COMMANDS[$index]}" \
+          "${TEST_OPERATION_CONFIGS[$index]}" \
+          "${TEST_OPERATION_TARGETS[$index]}"
+      fi
+    done
+  fi
+}
+
 run_tests() {
   local app
   local root
@@ -55,20 +168,32 @@ run_tests() {
     if [[ -f "$root/mix.exs" ]]; then
       require_command mix
       saw_step=1
-      collect_step "Mix Test" "$root" mix test
+      record_test_config "info" "configured mix test: $(relative_path "$root/mix.exs")"
+      collect_test_step "Mix Test" "$root" "mix test" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix test
     fi
 
-    if [[ -f "$root/package.json" ]] && package_has_script "$root" test; then
-      require_command pnpm
-      saw_step=1
-      collect_step "Node Test" "$root" pnpm run test
+    if [[ -f "$root/package.json" ]]; then
+      if package_has_script "$root" test; then
+        require_command pnpm
+        saw_step=1
+        record_test_config "info" "configured node test: $(relative_path "$root/package.json")"
+        collect_test_step "Node Test" "$root" "pnpm run test" "$(relative_path "$root/package.json")" "$(relative_path "$root")" pnpm run test
+      else
+        record_test_config "warning" "unconfigured node test: no test script in $(relative_path "$root/package.json")"
+        record_skipped_test_operation "pnpm run test" "$(relative_path "$root/package.json")" "$(relative_path "$root")"
+      fi
     fi
   done < <(unique_selected_apps)
 
   if [[ "$saw_step" -eq 1 ]]; then
+    print_test_summary
     fail_if_steps_failed
   else
-    printf "No test commands selected.\n"
+    if [[ "${#TEST_OPERATION_LEVELS[@]}" -gt 0 ]]; then
+      print_test_summary
+    else
+      printf "No test commands selected.\n"
+    fi
   fi
 }
 

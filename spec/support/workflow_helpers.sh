@@ -455,6 +455,9 @@ case "$*" in
   "format"*)
     exit "${JUST_FAKE_RUFF_FORMAT_STATUS:-0}"
     ;;
+  "check"*)
+    exit "${JUST_FAKE_RUFF_CHECK_STATUS:-0}"
+    ;;
 esac
 
 exit 0
@@ -534,6 +537,7 @@ run_wrapper() {
         JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL="${JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL:-0}" \
         JUST_FAKE_PROCESS_COMPOSE_STATUS="${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}" \
         JUST_FAKE_RUFF_FORMAT_STATUS="${JUST_FAKE_RUFF_FORMAT_STATUS:-0}" \
+        JUST_FAKE_RUFF_CHECK_STATUS="${JUST_FAKE_RUFF_CHECK_STATUS:-0}" \
         JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
         JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
@@ -669,8 +673,9 @@ test_path_selected_summary_uses_selector_and_pluralization() {
 
   run_wrapper status output "$fixture" "$fixture" lint apps/workspace/src
   assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "pnpm exec oxlint apps/workspace/src" || return
-  assert_output_contains "$output" "apps/workspace/src (2 files)" || return
+  assert_output_contains "$output" "[info] configured oxlint: oxlint.config.ts" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts] [oxlint.config.ts] apps/workspace/src/main.tsx apps/workspace/src/secondary.ts" || return
+  assert_output_not_contains "$output" "Command summary" || return
 }
 
 test_path_selected_python_uses_ruff_config() {
@@ -738,16 +743,55 @@ test_default_lint_summary_uses_repo_defaults() {
   run_wrapper status output "$fixture" "$fixture" lint
 
   assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "Check" || return
-  assert_output_contains "$output" "Requirement" || return
-  assert_output_contains "$output" "Linter" || return
-  assert_output_contains "$output" "Files" || return
-  assert_output_before "$output" "Check" "Linter" || return
-  assert_output_contains "$output" "repo defaults (tool config)" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] configured oxlint: oxlint.config.ts" || return
+  assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
+  assert_output_contains "$output" "[info] configured stylelint: stylelint.config.js" || return
+  assert_output_contains "$output" "[info] configured mix format: apps/api/.formatter.exs" || return
+  assert_output_contains "$output" "[info] configured credo: apps/api/.credo.exs" || return
+  assert_output_contains "$output" "[info] [mix credo --strict] [apps/api/.credo.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxlint] [oxlint.config.ts] configured files" || return
+  assert_output_contains "$output" "[info] [ruff check] [ruff.toml] configured files" || return
+  assert_output_contains "$output" "[info] [pnpm exec stylelint .] [stylelint.config.js] configured files" || return
+  assert_output_not_contains "$output" "Command summary" || return
+  assert_output_not_contains "$output" "Linter" || return
   assert_output_not_contains "$output" "default lint paths" || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
   assert_log_not_contains "$fixture" ".just/" || return
+}
+
+test_lint_selected_python_uses_ruff_config() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" lint scripts/foo.py
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
+  assert_output_contains "$output" "[info] [ruff check scripts/foo.py] [ruff.toml] scripts/foo.py" || return
+  assert_log_entry "$fixture" ruff "$fixture" check scripts/foo.py || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_lint_selected_python_without_config_skips_ruff() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm "$fixture/ruff.toml"
+
+  run_wrapper status output "$fixture" "$fixture" lint scripts/foo.py
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[warning] unconfigured ruff: no config found for scripts/foo.py" || return
+  assert_output_contains "$output" "[warning] [skipped] [ruff check scripts/foo.py] [no config] scripts/foo.py" || return
+  assert_log_not_contains "$fixture" "ruff" || return
 }
 
 test_lint_repo_root_selector_runs_default_contract() {
@@ -762,6 +806,7 @@ test_lint_repo_root_selector_runs_default_contract() {
   assert_status 0 "$status" "$output" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
   assert_log_not_contains "$fixture" ".just/" || return
 }
@@ -792,8 +837,8 @@ test_lint_preflight_failure_reports_and_continues() {
   run_wrapper status output "$fixture" "$fixture" lint apps/api
 
   assert_nonzero_status "$status" "$output" || return
-  assert_output_matches "$output" "Styler Formatter[[:space:]]+failed\\(1\\)" || return
-  assert_output_matches "$output" "Credo[[:space:]]+passed" || return
+  assert_output_contains "$output" "[error] [check Styler Formatter] [apps/api/.formatter.exs] Styler in .formatter.exs plugins" || return
+  assert_output_contains "$output" "[info] [mix credo --strict] [apps/api/.credo.exs] apps/api" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
 }
 
@@ -807,23 +852,41 @@ test_lint_aggregates_after_failing_sobelow() {
   JUST_FAKE_MIX_SOBELOW_STATUS=44 run_wrapper status output "$fixture" "$fixture" lint
 
   assert_nonzero_status "$status" "$output" || return
-  assert_output_matches "$output" "Sobelow[[:space:]]+failed\\(44\\)" || return
-  assert_output_matches "$output" "ExSlop Dependency[[:space:]]+passed" || return
-  assert_output_matches "$output" "ExSlop Credo Plugin[[:space:]]+passed" || return
-  assert_output_matches "$output" "ExcellentMigrations Dependency[[:space:]]+passed" || return
-  assert_output_matches "$output" "CodeStyle Dependency[[:space:]]+passed" || return
-  assert_output_matches "$output" "Styler Formatter[[:space:]]+passed" || return
-  assert_output_matches "$output" "ExDNA[[:space:]]+passed" || return
-  assert_output_matches "$output" "Reach[[:space:]]+passed" || return
-  assert_output_matches "$output" "Oxlint[[:space:]]+passed" || return
-  assert_output_matches "$output" "Stylelint[[:space:]]+passed" || return
+  assert_output_contains "$output" "[error] [mix sobelow --private --exit --threshold high] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [check ExSlop Dependency] [apps/api/mix.exs] {:ex_slop, ...} in mix.exs" || return
+  assert_output_contains "$output" "[info] [check ExSlop Credo Plugin] [apps/api/.credo.exs] {ExSlop, ...} in .credo.exs plugins" || return
+  assert_output_contains "$output" "[info] [check ExcellentMigrations Dependency] [apps/api/mix.exs] {:excellent_migrations, ...} in mix.exs" || return
+  assert_output_contains "$output" "[info] [check CodeStyle Dependency] [apps/api/mix.exs] {:code_style, ...} in mix.exs" || return
+  assert_output_contains "$output" "[info] [check Styler Formatter] [apps/api/.formatter.exs] Styler in .formatter.exs plugins" || return
+  assert_output_contains "$output" "[info] [mix ex_dna --min-mass 40 --max-clones 0] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix reach.check --arch --smells --strict] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxlint] [oxlint.config.ts] configured files" || return
+  assert_output_contains "$output" "[info] [ruff check] [ruff.toml] configured files" || return
+  assert_output_contains "$output" "[info] [pnpm exec stylelint .] [stylelint.config.js] configured files" || return
   assert_output_not_contains "$output" "Dialyzer" || return
   assert_log_not_contains "$fixture" "ex_slop" || return
   assert_log_not_contains "$fixture" "dialyzer" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" reach.check --arch --smells --strict || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
   assert_log_not_contains "$fixture" ".just/" || return
+}
+
+test_lint_aggregates_after_failing_ruff() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  JUST_FAKE_RUFF_CHECK_STATUS=42 run_wrapper status output "$fixture" "$fixture" lint scripts/foo.py apps/workspace/src/main.tsx
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxlint apps/workspace/src/main.tsx] [oxlint.config.ts] apps/workspace/src/main.tsx" || return
+  assert_output_contains "$output" "[error] [ruff check scripts/foo.py] [ruff.toml] scripts/foo.py" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx || return
+  assert_log_entry "$fixture" ruff "$fixture" check scripts/foo.py || return
 }
 
 test_format_check_aggregates_formatter_failures() {
@@ -876,12 +939,49 @@ TLA
   run_wrapper status output "$fixture" "$fixture" check specs docs/specs
 
   assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "cmd: sany docs/specs/Example.tla" || return
-  assert_output_contains "$output" "cmd: tlc -config docs/specs/Example.cfg docs/specs/Example.tla" || return
-  assert_output_contains "$output" "cmd: alloy commands docs/specs/Structure.als" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] [sany docs/specs/Example.tla] [tlaplus] docs/specs/Example.tla" || return
+  assert_output_contains "$output" "[info] [tlc -config docs/specs/Example.cfg docs/specs/Example.tla] [tlaplus] docs/specs/Example.cfg" || return
+  assert_output_contains "$output" "[info] [alloy commands docs/specs/Structure.als] [alloy] docs/specs/Structure.als" || return
+  assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" sany "$fixture" docs/specs/Example.tla || return
   assert_log_entry "$fixture" tlc "$fixture" -config docs/specs/Example.cfg docs/specs/Example.tla || return
   assert_log_entry "$fixture" alloy "$fixture" commands docs/specs/Structure.als || return
+}
+
+test_check_types_uses_compact_summary() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" check types
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured typecheck: apps/workspace/package.json" || return
+  assert_output_contains "$output" "[info] configured typecheck: apps/website/package.json" || return
+  assert_output_contains "$output" "[info] [pnpm run typecheck] [apps/workspace/package.json] apps/workspace" || return
+  assert_output_contains "$output" "[info] [pnpm run typecheck] [apps/website/package.json] apps/website" || return
+  assert_output_not_contains "$output" "Command summary" || return
+  assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run typecheck || return
+  assert_log_entry "$fixture" pnpm "$fixture/apps/website" run typecheck || return
+}
+
+test_check_knip_uses_compact_summary() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" check knip
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] [pnpm exec knip] [knip.json] ." || return
+  assert_output_not_contains "$output" "Command summary" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec knip || return
 }
 
 test_install_runs_project_dependency_installs() {
@@ -1020,6 +1120,14 @@ test_test_runs_standard_app_tests() {
   run_wrapper status output "$fixture" "$fixture" test
 
   assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] configured mix test: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] configured node test: apps/workspace/package.json" || return
+  assert_output_contains "$output" "[warning] unconfigured node test: no test script in apps/website/package.json" || return
+  assert_output_contains "$output" "[info] [mix test] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [pnpm run test] [apps/workspace/package.json] apps/workspace" || return
+  assert_output_contains "$output" "[warning] [skipped] [pnpm run test] [apps/website/package.json] apps/website" || return
+  assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" test || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run test || return
   assert_log_not_contains "$fixture" "$fixture/apps/website"$'\trun\ttest' || return
@@ -1035,6 +1143,14 @@ test_build_runs_standard_app_builds() {
   run_wrapper status output "$fixture" "$fixture" build
 
   assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] configured mix build: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] configured node build: apps/workspace/package.json" || return
+  assert_output_contains "$output" "[info] configured node build: apps/website/package.json" || return
+  assert_output_contains "$output" "[info] [mix compile --warnings-as-errors] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [pnpm run build] [apps/workspace/package.json] apps/workspace" || return
+  assert_output_contains "$output" "[info] [pnpm run build] [apps/website/package.json] apps/website" || return
+  assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" compile --warnings-as-errors || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run build || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/website" run build || return

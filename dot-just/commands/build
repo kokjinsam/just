@@ -3,8 +3,16 @@ set -euo pipefail
 
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+trap - EXIT
 
 declare -a SELECTED_APPS=()
+declare -a BUILD_CONFIG_LEVELS=()
+declare -a BUILD_CONFIG_MESSAGES=()
+declare -a BUILD_OPERATION_LEVELS=()
+declare -a BUILD_OPERATION_PREFIXES=()
+declare -a BUILD_OPERATION_COMMANDS=()
+declare -a BUILD_OPERATION_CONFIGS=()
+declare -a BUILD_OPERATION_TARGETS=()
 
 add_selected_app() {
   local app="$1"
@@ -46,6 +54,111 @@ unique_selected_apps() {
   printf "%s\n" "${SELECTED_APPS[@]}" | awk -F '\t' 'NF && !seen[$1 "\t" $2]++'
 }
 
+record_build_config() {
+  local level="$1"
+  local message="$2"
+
+  BUILD_CONFIG_LEVELS+=("$level")
+  BUILD_CONFIG_MESSAGES+=("$message")
+}
+
+record_build_operation() {
+  local level="$1"
+  local prefix="$2"
+  local command="$3"
+  local config="$4"
+  local target="$5"
+
+  BUILD_OPERATION_LEVELS+=("$level")
+  BUILD_OPERATION_PREFIXES+=("$prefix")
+  BUILD_OPERATION_COMMANDS+=("$command")
+  BUILD_OPERATION_CONFIGS+=("$config")
+  BUILD_OPERATION_TARGETS+=("$target")
+}
+
+record_skipped_build_operation() {
+  local command="$1"
+  local config="$2"
+  local target="$3"
+
+  record_build_operation "warning" "skipped" "$command" "$config" "$target"
+}
+
+last_step_status() {
+  local count
+  local index
+
+  count="${#JUST_STEP_STATUSES[@]}"
+  [[ "$count" -gt 0 ]] || printf "0\n"
+  [[ "$count" -gt 0 ]] || return 0
+
+  index="$((count - 1))"
+  printf "%s\n" "${JUST_STEP_STATUSES[$index]}"
+}
+
+collect_build_step() {
+  local label="$1"
+  local cwd="$2"
+  local display_command="$3"
+  local config="$4"
+  local target="$5"
+  local status
+  local level
+
+  shift 5
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$cwd" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
+  else
+    level="error"
+  fi
+
+  record_build_operation "$level" "" "$display_command" "$config" "$target"
+}
+
+print_build_summary() {
+  local index
+  local prefix
+  local total_configs="${#BUILD_CONFIG_LEVELS[@]}"
+  local total_operations="${#BUILD_OPERATION_LEVELS[@]}"
+
+  printf "\n== Summary ==\n\n"
+
+  if [[ "$total_configs" -gt 0 ]]; then
+    for ((index = 0; index < total_configs; index++)); do
+      printf "[%s] %s\n" "${BUILD_CONFIG_LEVELS[$index]}" "${BUILD_CONFIG_MESSAGES[$index]}"
+    done
+  fi
+
+  if [[ "$total_configs" -gt 0 && "$total_operations" -gt 0 ]]; then
+    printf "\n"
+  fi
+
+  if [[ "$total_operations" -gt 0 ]]; then
+    for ((index = 0; index < total_operations; index++)); do
+      prefix="${BUILD_OPERATION_PREFIXES[$index]}"
+
+      if [[ -n "$prefix" ]]; then
+        printf "[%s] [%s] [%s] [%s] %s\n" \
+          "${BUILD_OPERATION_LEVELS[$index]}" \
+          "$prefix" \
+          "${BUILD_OPERATION_COMMANDS[$index]}" \
+          "${BUILD_OPERATION_CONFIGS[$index]}" \
+          "${BUILD_OPERATION_TARGETS[$index]}"
+      else
+        printf "[%s] [%s] [%s] %s\n" \
+          "${BUILD_OPERATION_LEVELS[$index]}" \
+          "${BUILD_OPERATION_COMMANDS[$index]}" \
+          "${BUILD_OPERATION_CONFIGS[$index]}" \
+          "${BUILD_OPERATION_TARGETS[$index]}"
+      fi
+    done
+  fi
+}
+
 run_builds() {
   local app
   local root
@@ -55,20 +168,32 @@ run_builds() {
     if [[ -f "$root/mix.exs" ]]; then
       require_command mix
       saw_step=1
-      collect_step "Mix Compile" "$root" mix compile --warnings-as-errors
+      record_build_config "info" "configured mix build: $(relative_path "$root/mix.exs")"
+      collect_build_step "Mix Compile" "$root" "mix compile --warnings-as-errors" "$(relative_path "$root/mix.exs")" "$(relative_path "$root")" mix compile --warnings-as-errors
     fi
 
-    if [[ -f "$root/package.json" ]] && package_has_script "$root" build; then
-      require_command pnpm
-      saw_step=1
-      collect_step "Node Build" "$root" pnpm run build
+    if [[ -f "$root/package.json" ]]; then
+      if package_has_script "$root" build; then
+        require_command pnpm
+        saw_step=1
+        record_build_config "info" "configured node build: $(relative_path "$root/package.json")"
+        collect_build_step "Node Build" "$root" "pnpm run build" "$(relative_path "$root/package.json")" "$(relative_path "$root")" pnpm run build
+      else
+        record_build_config "warning" "unconfigured node build: no build script in $(relative_path "$root/package.json")"
+        record_skipped_build_operation "pnpm run build" "$(relative_path "$root/package.json")" "$(relative_path "$root")"
+      fi
     fi
   done < <(unique_selected_apps)
 
   if [[ "$saw_step" -eq 1 ]]; then
+    print_build_summary
     fail_if_steps_failed
   else
-    printf "No build commands selected.\n"
+    if [[ "${#BUILD_OPERATION_LEVELS[@]}" -gt 0 ]]; then
+      print_build_summary
+    else
+      printf "No build commands selected.\n"
+    fi
   fi
 }
 
