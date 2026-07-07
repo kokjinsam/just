@@ -326,6 +326,7 @@ ELIXIR
   printf "export const main = 1\n" >"$fixture/apps/workspace/src/main.tsx"
   printf "export const secondary = 2\n" >"$fixture/apps/workspace/src/secondary.ts"
   printf '{"scripts":{"build":"astro build","typecheck":"astro check"}}\n' >"$fixture/apps/website/package.json"
+  printf -- "---\nconst title = 'Home'\n---\n<h1>{title}</h1>\n" >"$fixture/apps/website/src/page.astro"
   printf "export const site = 3\n" >"$fixture/apps/website/src/site.ts"
 
   cp "$DOT_JUST_ROOT/lib/install_hex_dep.exs" "$fixture/.just/lib/install_hex_dep.exs"
@@ -556,7 +557,7 @@ test_lint_repo_root_selector_runs_default_contract() {
 
   assert_status 0 "$status" "$output" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts oxlint.config.ts stylelint.config.js || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts apps/website/src/page.astro oxlint.config.ts stylelint.config.js || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
 }
 
@@ -615,7 +616,7 @@ test_lint_aggregates_after_failing_sobelow() {
   assert_log_not_contains "$fixture" "ex_slop" || return
   assert_log_not_contains "$fixture" "dialyzer" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" reach.check --arch --smells --strict || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts oxlint.config.ts stylelint.config.js || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts apps/website/src/page.astro oxlint.config.ts stylelint.config.js || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
 }
 

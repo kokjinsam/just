@@ -88,10 +88,7 @@ add_lint_file() {
   *.css)
     STYLELINT_PATHS+=("$(lint_tool_path "$file")")
     ;;
-  *.astro)
-    return
-    ;;
-  *.cjs | *.cts | *.js | *.jsx | *.mjs | *.mts | *.ts | *.tsx)
+  *.astro | *.cjs | *.cts | *.js | *.jsx | *.mjs | *.mts | *.ts | *.tsx)
     OXLINT_PATHS+=("$(lint_tool_path "$file")")
     ;;
   *)
@@ -157,6 +154,7 @@ add_lint_path() {
         -path '*/priv/static/assets/*' \
         \) -prune \
         -o -type f \( \
+        -name '*.astro' -o \
         -name '*.css' -o \
         -name '*.cjs' -o \
         -name '*.cts' -o \
