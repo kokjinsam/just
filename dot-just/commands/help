@@ -44,9 +44,9 @@ Dev:
   just dev --dry-run                   Validate process-compose.yaml without starting servers
 
 Lint:
-  just lint [PATH...]                  Lint configured Elixir, JS, TS, and CSS paths
+  just lint [PATH...]                  Lint configured Elixir, JS, TS, CSS, and Python paths
 
 Format:
-  just format [PATH...]                Format configured JS, CSS, and Elixir paths
-  just format --check [PATH...]        Check configured JS, CSS, and Elixir paths
+  just format [PATH...]                Format configured JS, CSS, Python, and Elixir paths
+  just format --check [PATH...]        Check configured JS, CSS, Python, and Elixir paths
 EOF

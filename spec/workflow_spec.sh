@@ -31,6 +31,21 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "formats selected Python paths with Ruff config"
+    When call test_path_selected_python_uses_ruff_config
+    The status should equal 0
+  End
+
+  It "skips selected Python paths when Ruff config is missing"
+    When call test_path_selected_python_without_config_skips_ruff
+    The status should equal 0
+  End
+
+  It "reports missing default formatter configs as skips"
+    When call test_default_format_missing_configs_skips_without_failure
+    The status should equal 0
+  End
+
   It "reports repo defaults for default lint"
     When call test_default_lint_summary_uses_repo_defaults
     The status should equal 0
@@ -58,6 +73,11 @@ Describe "workflow scripts"
 
   It "aggregates formatter failures in check mode"
     When call test_format_check_aggregates_formatter_failures
+    The status should equal 0
+  End
+
+  It "aggregates Ruff formatter failures in check mode"
+    When call test_format_check_aggregates_ruff_failures
     The status should equal 0
   End
 

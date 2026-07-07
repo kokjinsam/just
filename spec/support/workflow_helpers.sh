@@ -310,6 +310,7 @@ new_fixture() {
 
   mkdir -p \
     "$fake_bin" \
+    "$fixture/scripts" \
     "$fixture/.vscode" \
     "$fixture/docs/specs" \
     "$fixture/apps/api/assets/css" \
@@ -337,11 +338,13 @@ YAML
   printf "{}\n" >"$fixture/knip.json"
   printf "processes: {}\n" >"$fixture/process-compose.yaml"
   printf "{}\n" >"$fixture/.oxfmtrc.json"
+  printf "line-length = 88\n" >"$fixture/ruff.toml"
   printf "root = true\n" >"$fixture/.editorconfig"
   printf "{}\n" >"$fixture/.vscode/settings.json"
   printf "default:\n" >"$fixture/Justfile"
 
   printf "body { color: black; }\n" >"$fixture/apps/api/assets/css/app.css"
+  printf "print('hello')\n" >"$fixture/scripts/foo.py"
   cat >"$fixture/apps/api/.credo.exs" <<'ELIXIR'
 %{
   configs: [
@@ -441,6 +444,23 @@ exit 0
 '
 
   # shellcheck disable=SC2016
+  write_fake_command "$fake_bin/ruff" '
+printf "ruff\t%s" "$PWD" >> "$JUST_FAKE_LOG"
+for arg in "$@"; do
+  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
+done
+printf "\n" >> "$JUST_FAKE_LOG"
+
+case "$*" in
+  "format"*)
+    exit "${JUST_FAKE_RUFF_FORMAT_STATUS:-0}"
+    ;;
+esac
+
+exit 0
+'
+
+  # shellcheck disable=SC2016
   write_fake_command "$fake_bin/process-compose" '
 printf "process-compose\t%s" "$PWD" >> "$JUST_FAKE_LOG"
 for arg in "$@"; do
@@ -513,6 +533,7 @@ run_wrapper() {
         JUST_FAKE_PNPM_FAIL_STYLELINT="${JUST_FAKE_PNPM_FAIL_STYLELINT:-0}" \
         JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL="${JUST_FAKE_PNPM_UNSUPPORTED_OXFMT_FAIL:-0}" \
         JUST_FAKE_PROCESS_COMPOSE_STATUS="${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}" \
+        JUST_FAKE_RUFF_FORMAT_STATUS="${JUST_FAKE_RUFF_FORMAT_STATUS:-0}" \
         JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
         JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
@@ -618,9 +639,17 @@ test_default_format_summary_uses_repo_defaults() {
   run_wrapper status output "$fixture" "$fixture" format --check
 
   assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "cmd: pnpm exec oxfmt --check" || return
-  assert_output_contains "$output" "files: repo defaults (tool config)" || return
+  assert_output_contains "$output" "== Summary ==" || return
+  assert_output_contains "$output" "[info] configured oxfmt: .oxfmtrc.json" || return
+  assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
+  assert_output_contains "$output" "[info] configured mix format: apps/api/.formatter.exs" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxfmt --check] [.oxfmtrc.json] configured files" || return
+  assert_output_contains "$output" "[info] [ruff format --check] [ruff.toml] configured files" || return
+  assert_output_contains "$output" "[info] [mix format --check-formatted] [apps/api/.formatter.exs] apps/api" || return
+  assert_output_not_contains "$output" "Command summary" || return
+  assert_output_not_contains "$output" "files:" || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check || return
+  assert_log_entry "$fixture" ruff "$fixture" format --check || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted || return
   assert_log_not_contains "$fixture" ".just/" || return
 }
@@ -634,13 +663,69 @@ test_path_selected_summary_uses_selector_and_pluralization() {
 
   run_wrapper status output "$fixture" "$fixture" format --check apps/workspace/src/main.tsx
   assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "cmd: pnpm exec oxfmt --check apps/workspace/src/main.tsx" || return
-  assert_output_contains "$output" "files: apps/workspace/src/main.tsx (1 file)" || return
+  assert_output_contains "$output" "[info] configured oxfmt: .oxfmtrc.json" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxfmt --check apps/workspace/src/main.tsx] [.oxfmtrc.json] apps/workspace/src/main.tsx" || return
+  assert_output_not_contains "$output" "Command summary" || return
 
   run_wrapper status output "$fixture" "$fixture" lint apps/workspace/src
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "pnpm exec oxlint apps/workspace/src" || return
   assert_output_contains "$output" "apps/workspace/src (2 files)" || return
+}
+
+test_path_selected_python_uses_ruff_config() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" format --check scripts/foo.py
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
+  assert_output_contains "$output" "[info] [ruff format --check scripts/foo.py] [ruff.toml] scripts/foo.py" || return
+  assert_log_entry "$fixture" ruff "$fixture" format --check scripts/foo.py || return
+}
+
+test_path_selected_python_without_config_skips_ruff() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm "$fixture/ruff.toml"
+
+  run_wrapper status output "$fixture" "$fixture" format --check scripts/foo.py
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[warning] unconfigured ruff: no config found for scripts/foo.py" || return
+  assert_output_contains "$output" "[warning] [skipped] [ruff format --check scripts/foo.py] [no config] scripts/foo.py" || return
+  assert_log_not_contains "$fixture" "ruff" || return
+}
+
+test_default_format_missing_configs_skips_without_failure() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm "$fixture/.oxfmtrc.json"
+  rm "$fixture/ruff.toml"
+  rm "$fixture/apps/api/.formatter.exs"
+
+  run_wrapper status output "$fixture" "$fixture" format --check
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[warning] unconfigured oxfmt: no .oxfmtrc.json found" || return
+  assert_output_contains "$output" "[warning] unconfigured ruff: no ruff.toml, .ruff.toml, or pyproject.toml config found" || return
+  assert_output_contains "$output" "[warning] unconfigured mix format: no .formatter.exs found for apps/api" || return
+  assert_output_contains "$output" "[warning] [skipped] [pnpm exec oxfmt --check] [no config] configured files" || return
+  assert_output_contains "$output" "[warning] [skipped] [ruff format --check] [no config] configured files" || return
+  assert_output_contains "$output" "[warning] [skipped] [mix format --check-formatted] [no config] apps/api" || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+  assert_log_not_contains "$fixture" "ruff" || return
+  assert_log_not_contains "$fixture" "mix" || return
 }
 
 test_default_lint_summary_uses_repo_defaults() {
@@ -751,8 +836,24 @@ test_format_check_aggregates_formatter_failures() {
   JUST_FAKE_PNPM_FAIL_OXFMT=31 run_wrapper status output "$fixture" "$fixture" format --check apps/workspace/src/main.tsx apps/api/mix.exs
 
   assert_nonzero_status "$status" "$output" || return
-  assert_output_contains "$output" "[failed exit 31] Oxfmt Check" || return
-  assert_output_contains "$output" "[ok] Mix Format Check" || return
+  assert_output_contains "$output" "[error] [pnpm exec oxfmt --check apps/workspace/src/main.tsx] [.oxfmtrc.json] apps/workspace/src/main.tsx" || return
+  assert_output_contains "$output" "[info] [mix format --check-formatted mix.exs] [apps/api/.formatter.exs] apps/api/mix.exs" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted mix.exs || return
+}
+
+test_format_check_aggregates_ruff_failures() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  JUST_FAKE_RUFF_FORMAT_STATUS=42 run_wrapper status output "$fixture" "$fixture" format --check scripts/foo.py apps/api/mix.exs
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "[error] [ruff format --check scripts/foo.py] [ruff.toml] scripts/foo.py" || return
+  assert_output_contains "$output" "[info] [mix format --check-formatted mix.exs] [apps/api/.formatter.exs] apps/api/mix.exs" || return
+  assert_log_entry "$fixture" ruff "$fixture" format --check scripts/foo.py || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted mix.exs || return
 }
 

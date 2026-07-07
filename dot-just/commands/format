@@ -3,20 +3,87 @@ set -euo pipefail
 
 # shellcheck source=dot-just/lib/lib.sh
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+trap - EXIT
 
 declare -a OXFMT_PATHS=()
+declare -a RUFF_PATHS=()
 declare -a MIX_FORMAT_INPUTS=()
 declare -a MIX_FORMAT_ROOTS=()
 declare -a FORMAT_SELECTORS=()
-RUN_DEFAULT_OXFMT=0
+declare -a FORMAT_CONFIG_LEVELS=()
+declare -a FORMAT_CONFIG_MESSAGES=()
+declare -a FORMAT_OPERATION_LEVELS=()
+declare -a FORMAT_OPERATION_PREFIXES=()
+declare -a FORMAT_OPERATION_COMMANDS=()
+declare -a FORMAT_OPERATION_CONFIGS=()
+declare -a FORMAT_OPERATION_TARGETS=()
+SELECT_DEFAULT_OXFMT=0
+SELECT_DEFAULT_RUFF=0
 
 has_oxfmt_config() {
   [[ -f "$REPO_ROOT/.oxfmtrc.json" ]]
 }
 
+oxfmt_config_display() {
+  printf ".oxfmtrc.json"
+}
+
 add_default_oxfmt_target() {
-  if has_oxfmt_config; then
-    RUN_DEFAULT_OXFMT=1
+  SELECT_DEFAULT_OXFMT=1
+}
+
+toml_has_ruff_config() {
+  grep -Eq '^[[:space:]]*\[tool\.ruff([.]|])' "$1"
+}
+
+root_ruff_config() {
+  if [[ -f "$REPO_ROOT/ruff.toml" ]]; then
+    printf "%s\n" "$REPO_ROOT/ruff.toml"
+  elif [[ -f "$REPO_ROOT/.ruff.toml" ]]; then
+    printf "%s\n" "$REPO_ROOT/.ruff.toml"
+  elif [[ -f "$REPO_ROOT/pyproject.toml" ]] && toml_has_ruff_config "$REPO_ROOT/pyproject.toml"; then
+    printf "%s\n" "$REPO_ROOT/pyproject.toml"
+  else
+    return 1
+  fi
+}
+
+ruff_config_for_path() {
+  local path="$1"
+  local dir
+
+  if [[ -d "$path" ]]; then
+    dir="$path"
+  else
+    dir="$(dirname "$path")"
+  fi
+
+  while [[ "$dir" == "$REPO_ROOT" || "$dir" == "$REPO_ROOT/"* ]]; do
+    if [[ -f "$dir/ruff.toml" ]]; then
+      printf "%s\n" "$dir/ruff.toml"
+      return 0
+    elif [[ -f "$dir/.ruff.toml" ]]; then
+      printf "%s\n" "$dir/.ruff.toml"
+      return 0
+    elif [[ -f "$dir/pyproject.toml" ]] && toml_has_ruff_config "$dir/pyproject.toml"; then
+      printf "%s\n" "$dir/pyproject.toml"
+      return 0
+    fi
+
+    [[ "$dir" != "$REPO_ROOT" ]] || break
+    dir="$(dirname "$dir")"
+  done
+
+  return 1
+}
+
+absolute_selected_path() {
+  local path="$1"
+
+  if [[ "$path" = /* ]]; then
+    printf "%s\n" "$path"
+  else
+    printf "%s/%s\n" "$REPO_ROOT" "$path"
   fi
 }
 
@@ -48,13 +115,16 @@ add_format_path() {
     add_default_format_targets
   elif root="$(elixir_root_for_path "$path")"; then
     add_elixir_format_path "$root" "$path"
+  elif [[ -f "$path" ]]; then
+    add_non_elixir_format_file "$path"
   else
-    add_oxfmt_path "$path"
+    add_non_elixir_format_path "$path"
   fi
 }
 
 add_default_format_targets() {
   add_default_oxfmt_target
+  add_default_ruff_target
 
   while read -r _ path; do
     add_mix_format_root "$path"
@@ -67,10 +137,61 @@ add_oxfmt_path() {
   OXFMT_PATHS+=("$(relative_path "$path")")
 }
 
+add_default_ruff_target() {
+  SELECT_DEFAULT_RUFF=1
+}
+
+add_ruff_path() {
+  local path="$1"
+
+  RUFF_PATHS+=("$(relative_path "$path")")
+}
+
+add_non_elixir_format_file() {
+  local file="$1"
+
+  case "$file" in
+  *.py | *.pyi)
+    add_ruff_path "$file"
+    ;;
+  *)
+    add_oxfmt_path "$file"
+    ;;
+  esac
+}
+
+add_non_elixir_format_path() {
+  local path="$1"
+  local file
+
+  if [[ -f "$path" ]]; then
+    add_non_elixir_format_file "$path"
+    return
+  fi
+
+  while IFS= read -r -d '' file; do
+    add_ruff_path "$file"
+  done < <(find "$path" -type f \( -name '*.py' -o -name '*.pyi' \) -print0)
+
+  add_oxfmt_path "$path"
+}
+
 add_mix_format_root() {
   local root="$1"
 
   MIX_FORMAT_ROOTS+=("$root")
+}
+
+has_mix_format_config() {
+  local root="$1"
+
+  [[ -f "$root/.formatter.exs" ]]
+}
+
+mix_format_config_display() {
+  local root="$1"
+
+  relative_path "$root/.formatter.exs"
 }
 
 mix_relative_path() {
@@ -148,6 +269,12 @@ unique_oxfmt_paths() {
   printf "%s\n" "${OXFMT_PATHS[@]}" | awk 'NF && !seen[$0]++'
 }
 
+unique_ruff_paths() {
+  [[ "${#RUFF_PATHS[@]}" -gt 0 ]] || return 0
+
+  printf "%s\n" "${RUFF_PATHS[@]}" | awk 'NF && !seen[$0]++'
+}
+
 unique_mix_inputs() {
   [[ "${#MIX_FORMAT_INPUTS[@]}" -gt 0 ]] || return 0
 
@@ -174,36 +301,217 @@ mix_inputs_for_root() {
   printf "%s\n" "${MIX_FORMAT_INPUTS[@]}" | awk -F '\t' -v root="$root" '$1 == root && $2 != "" && !seen[$2]++ { print $2 }'
 }
 
-format_selector_summary() {
-  printf "%s\n" "${FORMAT_SELECTORS[@]}" | awk 'NF && !seen[$0]++' | paste -sd ' ' -
+selected_mix_format_root() {
+  local expected_root="$1"
+  local root
+
+  [[ "${#MIX_FORMAT_ROOTS[@]}" -gt 0 ]] || return 1
+
+  for root in "${MIX_FORMAT_ROOTS[@]}"; do
+    if [[ "$root" == "$expected_root" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
-format_selector_display_suffix() {
-  if [[ "${#FORMAT_SELECTORS[@]}" -gt 0 ]]; then
-    printf " %s" "$(format_selector_summary)"
-  fi
+format_config_display() {
+  relative_path "$1"
 }
 
-format_summary_details() {
-  local count="$1"
-  local unit="$2"
-  local label
+format_paths_summary() {
+  local path
+  local separator=""
 
-  if [[ "${#FORMAT_SELECTORS[@]}" -eq 0 ]]; then
-    label="repo defaults"
+  for path in "$@"; do
+    printf "%s%s" "$separator" "$path"
+    separator=" "
+  done
+}
+
+record_format_config() {
+  local level="$1"
+  local message="$2"
+
+  FORMAT_CONFIG_LEVELS+=("$level")
+  FORMAT_CONFIG_MESSAGES+=("$message")
+}
+
+record_format_operation() {
+  local level="$1"
+  local prefix="$2"
+  local command="$3"
+  local config="$4"
+  local target="$5"
+
+  FORMAT_OPERATION_LEVELS+=("$level")
+  FORMAT_OPERATION_PREFIXES+=("$prefix")
+  FORMAT_OPERATION_COMMANDS+=("$command")
+  FORMAT_OPERATION_CONFIGS+=("$config")
+  FORMAT_OPERATION_TARGETS+=("$target")
+}
+
+record_skipped_format_operation() {
+  local command="$1"
+  local target="$2"
+
+  record_format_operation "warning" "skipped" "$command" "no config" "$target"
+}
+
+last_step_status() {
+  local count
+  local index
+
+  count="${#JUST_STEP_STATUSES[@]}"
+  [[ "$count" -gt 0 ]] || printf "0\n"
+  [[ "$count" -gt 0 ]] || return 0
+
+  index="$((count - 1))"
+  printf "%s\n" "${JUST_STEP_STATUSES[$index]}"
+}
+
+collect_format_step() {
+  local label="$1"
+  local cwd="$2"
+  local display_command="$3"
+  local config="$4"
+  local target="$5"
+  local status
+  local level
+
+  shift 5
+
+  JUST_STEP_DISPLAY_COMMAND="$display_command" collect_step "$label" "$cwd" "$@"
+  status="$(last_step_status)"
+
+  if [[ "$status" -eq 0 ]]; then
+    level="info"
   else
-    label="$(format_selector_summary)"
+    level="error"
   fi
 
-  if [[ "$count" -eq 1 && "$unit" == "files" ]]; then
-    unit="file"
-  fi
-
-  printf "  files: %s (%s %s)" "$label" "$count" "$unit"
+  record_format_operation "$level" "" "$display_command" "$config" "$target"
 }
 
-default_format_summary_details() {
-  printf "  files: repo defaults (tool config)"
+record_oxfmt_config_report() {
+  if [[ "$SELECT_DEFAULT_OXFMT" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if has_oxfmt_config; then
+    record_format_config "info" "configured oxfmt: $(oxfmt_config_display)"
+  else
+    record_format_config "warning" "unconfigured oxfmt: no .oxfmtrc.json found"
+  fi
+}
+
+record_ruff_config_report() {
+  local config
+  local path
+  local -a configs=()
+  local -a missing_paths=()
+
+  if [[ "$SELECT_DEFAULT_RUFF" -eq 0 && "${#RUFF_PATHS[@]}" -eq 0 ]]; then
+    return
+  fi
+
+  if [[ "$SELECT_DEFAULT_RUFF" -eq 1 ]]; then
+    if config="$(root_ruff_config)"; then
+      configs+=("$config")
+    else
+      record_format_config "warning" "unconfigured ruff: no ruff.toml, .ruff.toml, or pyproject.toml config found"
+    fi
+  fi
+
+  while IFS= read -r path; do
+    if config="$(ruff_config_for_path "$(absolute_selected_path "$path")")"; then
+      configs+=("$config")
+    else
+      missing_paths+=("$path")
+    fi
+  done < <(unique_ruff_paths)
+
+  if [[ "${#configs[@]}" -gt 0 ]]; then
+    while IFS= read -r config; do
+      record_format_config "info" "configured ruff: $(format_config_display "$config")"
+    done < <(printf "%s\n" "${configs[@]}" | awk 'NF && !seen[$0]++')
+  fi
+
+  if [[ "${#missing_paths[@]}" -gt 0 ]]; then
+    for path in "${missing_paths[@]}"; do
+      record_format_config "warning" "unconfigured ruff: no config found for $path"
+    done
+  fi
+}
+
+record_mix_config_report() {
+  local root
+  local -a roots=()
+
+  while IFS= read -r root; do
+    roots+=("$root")
+  done < <(unique_mix_format_roots)
+
+  while IFS= read -r root; do
+    roots+=("$root")
+  done < <(unique_mix_input_roots)
+
+  [[ "${#roots[@]}" -gt 0 ]] || return 0
+
+  while IFS= read -r root; do
+    if has_mix_format_config "$root"; then
+      record_format_config "info" "configured mix format: $(mix_format_config_display "$root")"
+    else
+      record_format_config "warning" "unconfigured mix format: no .formatter.exs found for $(relative_path "$root")"
+    fi
+  done < <(printf "%s\n" "${roots[@]}" | awk 'NF && !seen[$0]++')
+}
+
+record_format_config_report() {
+  record_oxfmt_config_report
+  record_ruff_config_report
+  record_mix_config_report
+}
+
+print_format_summary() {
+  local index
+  local total_configs="${#FORMAT_CONFIG_LEVELS[@]}"
+  local total_operations="${#FORMAT_OPERATION_LEVELS[@]}"
+  local prefix
+
+  printf "\n== Summary ==\n\n"
+
+  if [[ "$total_configs" -gt 0 ]]; then
+    for ((index = 0; index < total_configs; index++)); do
+      printf "[%s] %s\n" "${FORMAT_CONFIG_LEVELS[$index]}" "${FORMAT_CONFIG_MESSAGES[$index]}"
+    done
+  fi
+
+  if [[ "$total_configs" -gt 0 && "$total_operations" -gt 0 ]]; then
+    printf "\n"
+  fi
+
+  if [[ "$total_operations" -gt 0 ]]; then
+    for ((index = 0; index < total_operations; index++)); do
+      prefix="${FORMAT_OPERATION_PREFIXES[$index]}"
+
+      if [[ -n "$prefix" ]]; then
+        printf "[%s] [%s] [%s] [%s] %s\n" \
+          "${FORMAT_OPERATION_LEVELS[$index]}" \
+          "$prefix" \
+          "${FORMAT_OPERATION_COMMANDS[$index]}" \
+          "${FORMAT_OPERATION_CONFIGS[$index]}" \
+          "${FORMAT_OPERATION_TARGETS[$index]}"
+      else
+        printf "[%s] [%s] [%s] %s\n" \
+          "${FORMAT_OPERATION_LEVELS[$index]}" \
+          "${FORMAT_OPERATION_COMMANDS[$index]}" \
+          "${FORMAT_OPERATION_CONFIGS[$index]}" \
+          "${FORMAT_OPERATION_TARGETS[$index]}"
+      fi
+    done
+  fi
 }
 
 run_oxfmt() {
@@ -211,18 +519,29 @@ run_oxfmt() {
   local path
   local label
   local display_command
-  local details
+  local command
+  local target
   local -a paths=()
 
-  if [[ "$RUN_DEFAULT_OXFMT" -eq 1 ]]; then
-    require_command pnpm
-
+  if [[ "$SELECT_DEFAULT_OXFMT" -eq 1 ]]; then
     if [[ "$check" -eq 1 ]]; then
-      JUST_STEP_DISPLAY_DETAILS="$(default_format_summary_details)" \
-        collect_step "Oxfmt Check" "$REPO_ROOT" pnpm exec oxfmt --check
+      label="Oxfmt Check"
+      command="pnpm exec oxfmt --check"
+      if has_oxfmt_config; then
+        require_command pnpm
+        collect_format_step "$label" "$REPO_ROOT" "$command" "$(oxfmt_config_display)" "configured files" pnpm exec oxfmt --check
+      else
+        record_skipped_format_operation "$command" "configured files"
+      fi
     else
-      JUST_STEP_DISPLAY_DETAILS="$(default_format_summary_details)" \
-        collect_step "Oxfmt" "$REPO_ROOT" pnpm exec oxfmt
+      label="Oxfmt"
+      command="pnpm exec oxfmt"
+      if has_oxfmt_config; then
+        require_command pnpm
+        collect_format_step "$label" "$REPO_ROOT" "$command" "$(oxfmt_config_display)" "configured files" pnpm exec oxfmt
+      else
+        record_skipped_format_operation "$command" "configured files"
+      fi
     fi
   fi
 
@@ -231,21 +550,126 @@ run_oxfmt() {
   done < <(unique_oxfmt_paths)
 
   [[ "${#paths[@]}" -gt 0 ]] || return 0
-
-  require_command pnpm
+  target="$(format_paths_summary "${paths[@]}")"
 
   if [[ "$check" -eq 1 ]]; then
     label="Oxfmt Check"
-    display_command="pnpm exec oxfmt --check$(format_selector_display_suffix)"
-    details="$(format_summary_details "${#paths[@]}" "files")"
-    JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-      collect_step "$label" "$REPO_ROOT" pnpm exec oxfmt --check --no-error-on-unmatched-pattern "${paths[@]}"
+    display_command="$(command_string pnpm exec oxfmt --check "${paths[@]}")"
+    if has_oxfmt_config; then
+      require_command pnpm
+      collect_format_step "$label" "$REPO_ROOT" "$display_command" "$(oxfmt_config_display)" "$target" pnpm exec oxfmt --check --no-error-on-unmatched-pattern "${paths[@]}"
+    else
+      record_skipped_format_operation "$display_command" "$target"
+    fi
   else
     label="Oxfmt"
-    display_command="pnpm exec oxfmt$(format_selector_display_suffix)"
-    details="$(format_summary_details "${#paths[@]}" "files")"
-    JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-      collect_step "$label" "$REPO_ROOT" pnpm exec oxfmt --no-error-on-unmatched-pattern "${paths[@]}"
+    display_command="$(command_string pnpm exec oxfmt "${paths[@]}")"
+    if has_oxfmt_config; then
+      require_command pnpm
+      collect_format_step "$label" "$REPO_ROOT" "$display_command" "$(oxfmt_config_display)" "$target" pnpm exec oxfmt --no-error-on-unmatched-pattern "${paths[@]}"
+    else
+      record_skipped_format_operation "$display_command" "$target"
+    fi
+  fi
+}
+
+ruff_config_summary_for_paths() {
+  local path
+  local config
+  local -a configs=()
+
+  for path in "$@"; do
+    if config="$(ruff_config_for_path "$(absolute_selected_path "$path")")"; then
+      configs+=("$(format_config_display "$config")")
+    fi
+  done
+
+  if [[ "${#configs[@]}" -eq 0 ]]; then
+    printf "no config"
+    return
+  fi
+
+  if [[ "$(printf "%s\n" "${configs[@]}" | awk 'NF && !seen[$0]++' | wc -l | tr -d ' ')" -eq 1 ]]; then
+    printf "%s\n" "${configs[0]}"
+  else
+    printf "multiple configs"
+  fi
+}
+
+run_ruff() {
+  local check="$1"
+  local config
+  local path
+  local label
+  local display_command
+  local target
+  local -a paths=()
+  local -a runnable_paths=()
+  local -a skipped_paths=()
+
+  if [[ "$SELECT_DEFAULT_RUFF" -eq 1 ]]; then
+    if [[ "$check" -eq 1 ]]; then
+      label="Ruff Check"
+      display_command="ruff format --check"
+      if config="$(root_ruff_config)"; then
+        require_command ruff
+        collect_format_step "$label" "$REPO_ROOT" "$display_command" "$(format_config_display "$config")" "configured files" ruff format --check
+      else
+        record_skipped_format_operation "$display_command" "configured files"
+      fi
+    else
+      label="Ruff"
+      display_command="ruff format"
+      if config="$(root_ruff_config)"; then
+        require_command ruff
+        collect_format_step "$label" "$REPO_ROOT" "$display_command" "$(format_config_display "$config")" "configured files" ruff format
+      else
+        record_skipped_format_operation "$display_command" "configured files"
+      fi
+    fi
+  fi
+
+  while IFS= read -r path; do
+    paths+=("$path")
+  done < <(unique_ruff_paths)
+
+  [[ "${#paths[@]}" -gt 0 ]] || return 0
+
+  for path in "${paths[@]}"; do
+    if ruff_config_for_path "$(absolute_selected_path "$path")" >/dev/null; then
+      runnable_paths+=("$path")
+    else
+      skipped_paths+=("$path")
+    fi
+  done
+
+  if [[ "${#skipped_paths[@]}" -gt 0 ]]; then
+    for path in "${skipped_paths[@]}"; do
+      if [[ "$check" -eq 1 ]]; then
+        display_command="$(command_string ruff format --check "$path")"
+      else
+        display_command="$(command_string ruff format "$path")"
+      fi
+
+      record_skipped_format_operation "$display_command" "$path"
+    done
+  fi
+
+  [[ "${#runnable_paths[@]}" -gt 0 ]] || return 0
+
+  target="$(format_paths_summary "${runnable_paths[@]}")"
+  config="$(ruff_config_summary_for_paths "${runnable_paths[@]}")"
+
+  if [[ "$check" -eq 1 ]]; then
+    label="Ruff Check"
+    display_command="$(command_string ruff format --check "${runnable_paths[@]}")"
+    require_command ruff
+    collect_format_step "$label" "$REPO_ROOT" "$display_command" "$config" "$target" ruff format --check "${runnable_paths[@]}"
+  else
+    label="Ruff"
+    display_command="$(command_string ruff format "${runnable_paths[@]}")"
+    require_command ruff
+    collect_format_step "$label" "$REPO_ROOT" "$display_command" "$config" "$target" ruff format "${runnable_paths[@]}"
   fi
 }
 
@@ -255,7 +679,8 @@ run_mix_format() {
   local root
   local label
   local display_command
-  local details
+  local config
+  local target
   local -a inputs=()
   local -a roots=()
 
@@ -269,18 +694,30 @@ run_mix_format() {
 
   [[ "${#roots[@]}" -gt 0 ]] || return 0
 
-  require_command mix
-
   while IFS= read -r root; do
     if [[ -z "$root" ]]; then
       continue
     fi
 
-    if printf "%s\n" "${MIX_FORMAT_ROOTS[@]}" | grep -Fxq -- "$root"; then
+    if selected_mix_format_root "$root"; then
       if [[ "$check" -eq 1 ]]; then
-        collect_step "Mix Format Check" "$root" mix format --check-formatted
+        label="Mix Format Check"
+        display_command="mix format --check-formatted"
+        if has_mix_format_config "$root"; then
+          require_command mix
+          collect_format_step "$label" "$root" "$display_command" "$(mix_format_config_display "$root")" "$(relative_path "$root")" mix format --check-formatted
+        else
+          record_skipped_format_operation "$display_command" "$(relative_path "$root")"
+        fi
       else
-        collect_step "Mix Format" "$root" mix format
+        label="Mix Format"
+        display_command="mix format"
+        if has_mix_format_config "$root"; then
+          require_command mix
+          collect_format_step "$label" "$root" "$display_command" "$(mix_format_config_display "$root")" "$(relative_path "$root")" mix format
+        else
+          record_skipped_format_operation "$display_command" "$(relative_path "$root")"
+        fi
       fi
 
       continue
@@ -292,19 +729,28 @@ run_mix_format() {
     done < <(mix_inputs_for_root "$root")
 
     [[ "${#inputs[@]}" -gt 0 ]] || continue
+    target="$(printf "%s\n" "${inputs[@]}" | awk -v root="$(relative_path "$root")" 'NF { print root "/" $0 }' | paste -sd ' ' -)"
 
     if [[ "$check" -eq 1 ]]; then
       label="Mix Format Check"
-      display_command="mix format --check-formatted$(format_selector_display_suffix)"
-      details="$(format_summary_details "${#inputs[@]}" "files")"
-      JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-        collect_step "$label" "$root" mix format --check-formatted "${inputs[@]}"
+      display_command="$(command_string mix format --check-formatted "${inputs[@]}")"
+      if has_mix_format_config "$root"; then
+        config="$(mix_format_config_display "$root")"
+        require_command mix
+        collect_format_step "$label" "$root" "$display_command" "$config" "$target" mix format --check-formatted "${inputs[@]}"
+      else
+        record_skipped_format_operation "$display_command" "$target"
+      fi
     else
       label="Mix Format"
-      display_command="mix format$(format_selector_display_suffix)"
-      details="$(format_summary_details "${#inputs[@]}" "files")"
-      JUST_STEP_DISPLAY_COMMAND="$display_command" JUST_STEP_DISPLAY_DETAILS="$details" \
-        collect_step "$label" "$root" mix format "${inputs[@]}"
+      display_command="$(command_string mix format "${inputs[@]}")"
+      if has_mix_format_config "$root"; then
+        config="$(mix_format_config_display "$root")"
+        require_command mix
+        collect_format_step "$label" "$root" "$display_command" "$config" "$target" mix format "${inputs[@]}"
+      else
+        record_skipped_format_operation "$display_command" "$target"
+      fi
     fi
   done < <(printf "%s\n" "${roots[@]}" | awk 'NF && !seen[$0]++')
 }
@@ -346,13 +792,21 @@ main() {
     add_default_format_targets
   fi
 
-  if [[ "$RUN_DEFAULT_OXFMT" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
+  if [[ "$SELECT_DEFAULT_OXFMT" -eq 0 && "$SELECT_DEFAULT_RUFF" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 && "${#RUFF_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
     printf "No formatter-compatible files selected.\n"
     return
   fi
 
+  record_format_config_report
   run_oxfmt "$check"
+  run_ruff "$check"
   run_mix_format "$check"
+  print_format_summary
+
+  if [[ "${#JUST_STEP_STATUSES[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
   fail_if_steps_failed
 }
 
