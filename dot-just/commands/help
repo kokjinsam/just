@@ -21,6 +21,9 @@ Remove:
   just remove hex:<pkg> --app <app>
                                        Remove <pkg> from an Elixir app
 
+Update:
+  just update recipes                  Refresh the managed just recipes
+
 Check:
   just check specs [PATH...]           Check TLA+, Alloy, and OpenAPI specs
   just check types [PATH...]           Typecheck TypeScript apps under paths

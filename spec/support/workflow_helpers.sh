@@ -185,6 +185,46 @@ assert_log_equals() {
   fi
 }
 
+assert_runtime_bundle_files() {
+  local fixture="$1"
+  local expected
+  local actual
+
+  expected="$(mktemp "$fixture/expected-runtime-files.XXXXXX")"
+  actual="$(mktemp "$fixture/actual-runtime-files.XXXXXX")"
+
+  cat >"$expected" <<'TEXT'
+bin/workflow
+commands/build
+commands/check
+commands/dev
+commands/format
+commands/help
+commands/install
+commands/lint
+commands/migrate
+commands/remove
+commands/reset
+commands/test
+commands/update
+kokjinsam.just
+lib/install_hex_dep.exs
+lib/lib.sh
+lib/remove_hex_dep.exs
+TEXT
+
+  (
+    cd "$fixture/.just" &&
+      find . -type f -print |
+      sed 's#^\./##' |
+        sort
+  ) >"$actual"
+
+  if ! diff -u "$expected" "$actual" >&2; then
+    return 1
+  fi
+}
+
 write_mix_exs() {
   local mix_exs="$1"
   local include_uniq="${2:-0}"
@@ -342,6 +382,7 @@ ELIXIR
     "$fixture/.just/commands/remove" \
     "$fixture/.just/commands/reset" \
     "$fixture/.just/commands/test" \
+    "$fixture/.just/commands/update" \
     "$fixture/.just/lib/lib.sh"
 
   # shellcheck disable=SC2016
@@ -475,6 +516,48 @@ run_wrapper() {
         JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
         JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
+  ) >"$__captured_output" 2>&1
+  __captured_status="$?"
+  set -e
+
+  printf -v "$__status_var" "%s" "$__captured_status"
+  printf -v "$__output_var" "%s" "$__captured_output"
+}
+
+prepare_update_entrypoint() {
+  local fixture="$1"
+
+  cp "$JUST_BUNDLE_ROOT/kokjinsam.just" "$fixture/.just/kokjinsam.just"
+  cp "$DOT_JUST_ROOT/bin/workflow" "$fixture/.just/bin/workflow"
+  cp "$DOT_JUST_ROOT/commands/update" "$fixture/.just/commands/update"
+  cp "$DOT_JUST_ROOT/lib/lib.sh" "$fixture/.just/lib/lib.sh"
+  chmod +x "$fixture/.just/bin/workflow"
+
+  cat >"$fixture/Justfile" <<'JUST'
+import? '.just/kokjinsam.just'
+
+default:
+JUST
+}
+
+run_just_in_fixture() {
+  local __status_var="$1"
+  local __output_var="$2"
+  local fixture="$3"
+  local __captured_output
+  local __captured_status
+
+  shift 3
+  __captured_output="$(mktemp "$fixture/output.just.XXXXXX")"
+
+  set +e
+  (
+    cd "$fixture" &&
+      env \
+        PATH="$fixture/fake-bin:$PATH" \
+        KOKJINSAM_JUST_BASE_URL="file://$JUST_BUNDLE_ROOT" \
+        JUST_FAKE_LOG="$fixture/fake.log" \
+        just "$@"
   ) >"$__captured_output" 2>&1
   __captured_status="$?"
   set -e
@@ -752,6 +835,38 @@ test_install_hex_dep_uses_temp_mix_exs_and_compact_summary() {
     printf "\n"
   } >"$expected_log"
   assert_log_equals "$fixture" "$expected_log" || return
+}
+
+test_update_recipes_dispatches_from_just() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  prepare_update_entrypoint "$fixture"
+  mkdir -p "$fixture/.just/tests"
+  printf "source-only test helper\n" >"$fixture/.just/tests/check_scripts"
+
+  run_just_in_fixture status output "$fixture" update recipes
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "Installed Kok Jin Sam's just workflow into $fixture/.just" || return
+  assert_file_contains "$fixture/.just/kokjinsam.just" "update *args:" || return
+  assert_file_contains "$fixture/.just/bin/workflow" "remove | update | check" || return
+  assert_runtime_bundle_files "$fixture" || return
+}
+
+test_update_unknown_target_fails_clearly() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" update nope
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: unknown update target: nope" || return
 }
 
 test_remove_hex_dep_uses_temp_mix_exs_and_leaves_parsable_elixir() {

@@ -12,6 +12,10 @@ remove *args:
     @.just/bin/workflow remove "$@"
 
 [positional-arguments]
+update *args:
+    @.just/bin/workflow update "$@"
+
+[positional-arguments]
 check *args:
     @JUST_CALLER_DIR={{ quote(invocation_directory()) }} .just/bin/workflow check "$@"
 

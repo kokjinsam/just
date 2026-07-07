@@ -63,6 +63,7 @@ for file in \
   commands/remove \
   commands/reset \
   commands/test \
+  commands/update \
   lib/install_hex_dep.exs \
   lib/lib.sh \
   lib/remove_hex_dep.exs; do
@@ -84,6 +85,7 @@ for file in \
   commands/remove \
   commands/reset \
   commands/test \
+  commands/update \
   lib/install_hex_dep.exs \
   lib/lib.sh \
   lib/remove_hex_dep.exs; do

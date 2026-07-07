@@ -52,8 +52,20 @@ apps:
 
 ## Updating
 
-Re-run the bootstrap from the consuming repository root. To install from a
-specific branch, tag, or commit:
+After installation, refresh the managed recipes from the consuming repository
+root:
+
+```bash
+just update recipes
+```
+
+To refresh from a specific branch, tag, or commit:
+
+```bash
+KOKJINSAM_JUST_REF=v0.1.0 just update recipes
+```
+
+For the first install, run the bootstrap:
 
 ```bash
 KOKJINSAM_JUST_REF=v0.1.0 \

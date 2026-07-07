@@ -9,7 +9,7 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 case "$command" in
-help | install | remove | check | dev | lint | migrate | format | reset | test | build)
+help | install | remove | update | check | dev | lint | migrate | format | reset | test | build)
   exec bash "$JUST_ROOT/commands/$command" "$@"
   ;;
 *)

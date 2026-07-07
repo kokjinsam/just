@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# shellcheck source=dot-just/lib/lib.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
+
+UPDATE_TMP_DIR=""
+
+cleanup_update_tmp() {
+  if [[ -n "$UPDATE_TMP_DIR" ]]; then
+    rm -rf "$UPDATE_TMP_DIR"
+  fi
+}
+
+download_bootstrap() {
+  local source="$1"
+  local destination="$2"
+
+  require_command curl
+  mkdir -p "$(dirname -- "$destination")"
+  curl -fsSL --retry 3 --retry-delay 1 -o "$destination" "$source"
+}
+
+update_recipes() {
+  local ref
+  local base_url
+  local target_root
+  local tmp_base
+  local bootstrap_path
+
+  ref="${KOKJINSAM_JUST_REF:-main}"
+  base_url="${KOKJINSAM_JUST_BASE_URL:-https://raw.githubusercontent.com/kokjinsam/just/$ref}"
+  target_root="${KOKJINSAM_JUST_TARGET:-$REPO_ROOT}"
+  tmp_base="${TMPDIR:-/tmp}"
+  tmp_base="${tmp_base%/}"
+  UPDATE_TMP_DIR="$(mktemp -d "$tmp_base/kokjinsam-just-update.XXXXXX")"
+  bootstrap_path="$UPDATE_TMP_DIR/bootstrap"
+  trap cleanup_update_tmp EXIT
+
+  download_bootstrap "$base_url/bootstrap" "$bootstrap_path"
+
+  KOKJINSAM_JUST_REF="$ref" \
+    KOKJINSAM_JUST_BASE_URL="$base_url" \
+    KOKJINSAM_JUST_TARGET="$target_root" \
+    bash "$bootstrap_path"
+}
+
+main() {
+  local target="${1:-}"
+
+  case "$target" in
+  recipes)
+    shift
+    [[ "$#" -eq 0 ]] || die "just update recipes does not accept extra arguments"
+    update_recipes
+    ;;
+  "")
+    die "usage: just update recipes"
+    ;;
+  *)
+    die "unknown update target: $target"
+    ;;
+  esac
+}
+
+main "$@"

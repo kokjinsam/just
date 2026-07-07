@@ -81,6 +81,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "updates managed recipes through the exported just recipe"
+    When call test_update_recipes_dispatches_from_just
+    The status should equal 0
+  End
+
+  It "fails clearly for unknown update targets"
+    When call test_update_unknown_target_fails_clearly
+    The status should equal 0
+  End
+
   It "removes Hex dependencies and leaves parsable Elixir"
     When call test_remove_hex_dep_uses_temp_mix_exs_and_leaves_parsable_elixir
     The status should equal 0
