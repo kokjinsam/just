@@ -8,20 +8,39 @@ declare -a OXLINT_PATHS=()
 declare -a STYLELINT_PATHS=()
 declare -a LINT_SELECTORS=()
 declare -a MIX_LINT_ROOTS=()
+RUN_DEFAULT_OXLINT=0
+RUN_DEFAULT_STYLELINT=0
 
 export JUST_STEP_REPORT_STYLE="lint-table"
 
-default_lint_paths() {
-  local path
+has_oxlint_config() {
+  [[ -f "$REPO_ROOT/oxlint.config.js" ]] ||
+    [[ -f "$REPO_ROOT/oxlint.config.cjs" ]] ||
+    [[ -f "$REPO_ROOT/oxlint.config.mjs" ]] ||
+    [[ -f "$REPO_ROOT/oxlint.config.ts" ]]
+}
+
+has_stylelint_config() {
+  [[ -f "$REPO_ROOT/stylelint.config.js" ]] ||
+    [[ -f "$REPO_ROOT/stylelint.config.cjs" ]] ||
+    [[ -f "$REPO_ROOT/stylelint.config.mjs" ]] ||
+    [[ -f "$REPO_ROOT/stylelint.config.ts" ]]
+}
+
+add_default_lint_targets() {
   local root
 
-  while read -r _app root; do
-    printf "%s\n" "$root"
-  done < <(app_entries)
+  if has_oxlint_config; then
+    RUN_DEFAULT_OXLINT=1
+  fi
 
-  for path in "$REPO_ROOT/oxlint.config.ts" "$REPO_ROOT/stylelint.config.js"; do
-    [[ -e "$path" ]] && printf "%s\n" "$path"
-  done
+  if has_stylelint_config; then
+    RUN_DEFAULT_STYLELINT=1
+  fi
+
+  while read -r _app root; do
+    add_mix_lint_root "$root"
+  done < <(elixir_roots)
 }
 
 normalize_path() {
@@ -106,10 +125,7 @@ add_lint_path() {
   path="$(normalize_path "$path")"
 
   if [[ "$path" == "$REPO_ROOT" ]]; then
-    while IFS= read -r path; do
-      add_lint_path "$path"
-    done < <(default_lint_paths)
-
+    add_default_lint_targets
     return
   fi
 
@@ -218,6 +234,10 @@ lint_files_summary() {
   printf "%s (%s %s)" "$label" "$count" "$unit"
 }
 
+default_lint_files_summary() {
+  printf "repo defaults (tool config)"
+}
+
 lint_summary_details() {
   local count="$1"
 
@@ -274,6 +294,12 @@ run_oxlint() {
   local display_command
   local details
 
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 1 ]]; then
+    require_command pnpm
+    JUST_STEP_DISPLAY_DETAILS="  files: $(default_lint_files_summary)" \
+      lint_tool_step "Oxlint" "$REPO_ROOT" "$(default_lint_files_summary)" pnpm exec oxlint
+  fi
+
   while IFS= read -r path; do
     paths+=("$path")
   done < <(unique_oxlint_paths)
@@ -292,6 +318,12 @@ run_stylelint() {
   local -a paths=()
   local display_command
   local details
+
+  if [[ "$RUN_DEFAULT_STYLELINT" -eq 1 ]]; then
+    require_command pnpm
+    JUST_STEP_DISPLAY_DETAILS="  files: $(default_lint_files_summary)" \
+      lint_tool_step "Stylelint" "$REPO_ROOT" "$(default_lint_files_summary)" pnpm exec stylelint .
+  fi
 
   while IFS= read -r path; do
     paths+=("$path")
@@ -416,12 +448,10 @@ main() {
   done
 
   if [[ "$saw_path" -eq 0 ]]; then
-    while IFS= read -r path; do
-      add_lint_path "$path"
-    done < <(default_lint_paths)
+    add_default_lint_targets
   fi
 
-  if [[ "${#OXLINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
+  if [[ "$RUN_DEFAULT_OXLINT" -eq 0 && "$RUN_DEFAULT_STYLELINT" -eq 0 && "${#OXLINT_PATHS[@]}" -eq 0 && "${#STYLELINT_PATHS[@]}" -eq 0 && "${#MIX_LINT_ROOTS[@]}" -eq 0 ]]; then
     printf "No lint-compatible files selected.\n"
     return
   fi

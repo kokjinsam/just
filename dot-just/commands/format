@@ -8,35 +8,16 @@ declare -a OXFMT_PATHS=()
 declare -a MIX_FORMAT_INPUTS=()
 declare -a MIX_FORMAT_ROOTS=()
 declare -a FORMAT_SELECTORS=()
+RUN_DEFAULT_OXFMT=0
 
-default_oxfmt_paths() {
-  local path
-  local root
+has_oxfmt_config() {
+  [[ -f "$REPO_ROOT/.oxfmtrc.json" ]]
+}
 
-  while read -r _app root; do
-    if [[ -f "$root/mix.exs" ]]; then
-      [[ -d "$root/assets/css" ]] && printf "%s\n" "$root/assets/css"
-    else
-      printf "%s\n" "$root"
-    fi
-  done < <(app_entries)
-
-  for path in \
-    "$REPO_ROOT/package.json" \
-    "$REPO_ROOT/pnpm-workspace.yaml" \
-    "$REPO_ROOT/oxlint.config.ts" \
-    "$REPO_ROOT/stylelint.config.js" \
-    "$REPO_ROOT/knip.json" \
-    "$REPO_ROOT/process-compose.yaml" \
-    "$REPO_ROOT/.oxfmtrc.json" \
-    "$REPO_ROOT/.editorconfig" \
-    "$REPO_ROOT/.vscode/settings.json" \
-    "$REPO_ROOT/Justfile" \
-    "$JUST_ROOT/bin/workflow" \
-    "$JUST_ROOT/commands" \
-    "$JUST_ROOT/lib/lib.sh"; do
-    [[ -e "$path" ]] && printf "%s\n" "$path"
-  done
+add_default_oxfmt_target() {
+  if has_oxfmt_config; then
+    RUN_DEFAULT_OXFMT=1
+  fi
 }
 
 normalize_path() {
@@ -64,10 +45,7 @@ add_format_path() {
   path="$(normalize_path "$path")"
 
   if [[ "$path" == "$REPO_ROOT" ]]; then
-    add_oxfmt_path "$path"
-    while read -r _ root; do
-      add_mix_format_root "$root"
-    done < <(elixir_roots)
+    add_default_format_targets
   elif root="$(elixir_root_for_path "$path")"; then
     add_elixir_format_path "$root" "$path"
   else
@@ -75,12 +53,8 @@ add_format_path() {
   fi
 }
 
-add_default_format_paths() {
-  local path
-
-  while IFS= read -r path; do
-    add_oxfmt_path "$path"
-  done < <(default_oxfmt_paths)
+add_default_format_targets() {
+  add_default_oxfmt_target
 
   while read -r _ path; do
     add_mix_format_root "$path"
@@ -228,6 +202,10 @@ format_summary_details() {
   printf "  files: %s (%s %s)" "$label" "$count" "$unit"
 }
 
+default_format_summary_details() {
+  printf "  files: repo defaults (tool config)"
+}
+
 run_oxfmt() {
   local check="$1"
   local path
@@ -235,6 +213,18 @@ run_oxfmt() {
   local display_command
   local details
   local -a paths=()
+
+  if [[ "$RUN_DEFAULT_OXFMT" -eq 1 ]]; then
+    require_command pnpm
+
+    if [[ "$check" -eq 1 ]]; then
+      JUST_STEP_DISPLAY_DETAILS="$(default_format_summary_details)" \
+        collect_step "Oxfmt Check" "$REPO_ROOT" pnpm exec oxfmt --check
+    else
+      JUST_STEP_DISPLAY_DETAILS="$(default_format_summary_details)" \
+        collect_step "Oxfmt" "$REPO_ROOT" pnpm exec oxfmt
+    fi
+  fi
 
   while IFS= read -r path; do
     paths+=("$path")
@@ -353,10 +343,10 @@ main() {
   done
 
   if [[ "$saw_path" -eq 0 ]]; then
-    add_default_format_paths
+    add_default_format_targets
   fi
 
-  if [[ "${#OXFMT_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
+  if [[ "$RUN_DEFAULT_OXFMT" -eq 0 && "${#OXFMT_PATHS[@]}" -eq 0 && "${#MIX_FORMAT_ROOTS[@]}" -eq 0 && "${#MIX_FORMAT_INPUTS[@]}" -eq 0 ]]; then
     printf "No formatter-compatible files selected.\n"
     return
   fi

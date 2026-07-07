@@ -619,7 +619,10 @@ test_default_format_summary_uses_repo_defaults() {
 
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "cmd: pnpm exec oxfmt --check" || return
-  assert_output_matches "$output" "files: repo defaults \\([0-9]+ files\\)" || return
+  assert_output_contains "$output" "files: repo defaults (tool config)" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted || return
+  assert_log_not_contains "$fixture" ".just/" || return
 }
 
 test_path_selected_summary_uses_selector_and_pluralization() {
@@ -655,8 +658,11 @@ test_default_lint_summary_uses_repo_defaults() {
   assert_output_contains "$output" "Linter" || return
   assert_output_contains "$output" "Files" || return
   assert_output_before "$output" "Check" "Linter" || return
-  assert_output_matches "$output" "repo defaults \\([0-9]+ files\\)" || return
+  assert_output_contains "$output" "repo defaults (tool config)" || return
   assert_output_not_contains "$output" "default lint paths" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
+  assert_log_not_contains "$fixture" ".just/" || return
 }
 
 test_lint_repo_root_selector_runs_default_contract() {
@@ -670,8 +676,9 @@ test_lint_repo_root_selector_runs_default_contract() {
 
   assert_status 0 "$status" "$output" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts apps/website/src/page.astro oxlint.config.ts stylelint.config.js || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
+  assert_log_not_contains "$fixture" ".just/" || return
 }
 
 test_lint_accepts_end_of_options_path() {
@@ -729,8 +736,9 @@ test_lint_aggregates_after_failing_sobelow() {
   assert_log_not_contains "$fixture" "ex_slop" || return
   assert_log_not_contains "$fixture" "dialyzer" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" reach.check --arch --smells --strict || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/workspace/src/main.tsx apps/workspace/src/secondary.ts apps/website/src/site.ts apps/website/src/page.astro oxlint.config.ts stylelint.config.js || return
-  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
+  assert_log_not_contains "$fixture" ".just/" || return
 }
 
 test_format_check_aggregates_formatter_failures() {
