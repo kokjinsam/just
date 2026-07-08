@@ -5,7 +5,6 @@ set -euo pipefail
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/lib/lib.sh"
 trap - EXIT
 
-declare -a CHECK_FILES=()
 declare -a TYPECHECK_ROOTS=()
 declare -a PYREFLY_PATHS=()
 declare -a DIALYZER_ROOTS=()
@@ -17,58 +16,6 @@ declare -a CHECK_OPERATION_COMMANDS=()
 declare -a CHECK_OPERATION_CONFIGS=()
 declare -a CHECK_OPERATION_TARGETS=()
 RUN_DEFAULT_PYREFLY=0
-
-add_file() {
-  local file="$1"
-
-  case "$file" in
-  *.tla | *.cfg | *.als)
-    CHECK_FILES+=("$file")
-    ;;
-  esac
-}
-
-collect_path() {
-  local path
-
-  path="$(resolve_path "$1")"
-
-  if [[ -d "$path" ]]; then
-    while IFS= read -r -d '' file; do
-      add_file "$file"
-    done < <(discover_project_files "$path")
-  elif [[ -f "$path" ]]; then
-    add_file "$path"
-  else
-    die "path does not exist: $path"
-  fi
-}
-
-unique_files() {
-  local file
-
-  [[ "${#CHECK_FILES[@]}" -gt 0 ]] || return 0
-
-  printf "%s\n" "${CHECK_FILES[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
-    [[ -n "$file" ]] && printf "%s\n" "$file"
-  done
-}
-
-cfg_has_selected_tla_module() {
-  local cfg="$1"
-  local tla="${cfg%.cfg}.tla"
-  local file
-
-  [[ "${#CHECK_FILES[@]}" -gt 0 ]] || return 1
-
-  for file in "${CHECK_FILES[@]}"; do
-    if [[ "$file" == "$tla" ]]; then
-      return 0
-    fi
-  done
-
-  return 1
-}
 
 package_has_script() {
   local root="$1"
@@ -347,111 +294,6 @@ print_check_summary() {
   fi
 }
 
-require_tool_command() {
-  local command="$1"
-  local plugin="$2"
-
-  command -v "$command" >/dev/null 2>&1 ||
-    die "missing required command: $command; run 'asdf install' after adding the '$plugin' asdf plugin"
-}
-
-check_tla_module() {
-  local file="$1"
-  local display_command
-  local relative_file
-
-  require_tool_command sany tlaplus
-  relative_file="$(relative_path "$file")"
-  display_command="$(command_string sany "$relative_file")"
-  collect_check_step "TLA SANY" "$REPO_ROOT" "$display_command" "tlaplus" "$relative_file" sany "$relative_file"
-}
-
-check_tla_model() {
-  local cfg="$1"
-  local tla="${cfg%.cfg}.tla"
-  local display_command
-  local relative_cfg
-  local relative_tla
-
-  [[ -f "$tla" ]] || die "cannot find TLA module for config: $cfg"
-
-  require_tool_command tlc tlaplus
-  relative_cfg="$(relative_path "$cfg")"
-  relative_tla="$(relative_path "$tla")"
-  display_command="$(command_string tlc -config "$relative_cfg" "$relative_tla")"
-  collect_check_step "TLA TLC" "$REPO_ROOT" "$display_command" "tlaplus" "$relative_cfg" tlc -config "$relative_cfg" "$relative_tla"
-}
-
-check_alloy_model() {
-  local file="$1"
-  local display_command
-  local relative_file
-
-  require_tool_command alloy alloy
-  relative_file="$(relative_path "$file")"
-  display_command="$(command_string alloy commands "$relative_file")"
-  collect_check_step "Alloy" "$REPO_ROOT" "$display_command" "alloy" "$relative_file" alloy commands "$relative_file"
-}
-
-collect_default_specs() {
-  local path
-
-  path="$REPO_ROOT/docs"
-  [[ -d "$path" ]] || die "docs directory does not exist"
-
-  collect_path "$path"
-}
-
-check_specs() {
-  local path
-  local file
-  local saw_file=0
-
-  if [[ "$#" -eq 0 ]]; then
-    collect_default_specs
-  else
-    for path in "$@"; do
-      collect_path "$path"
-    done
-  fi
-
-  if [[ "${#CHECK_FILES[@]}" -eq 0 ]]; then
-    printf "No .tla, .cfg, or .als files found.\n"
-    return
-  fi
-
-  while IFS= read -r file; do
-    saw_file=1
-
-    case "$file" in
-    *.tla)
-      check_tla_module "$file"
-
-      if [[ -f "${file%.tla}.cfg" ]]; then
-        check_tla_model "${file%.tla}.cfg"
-      fi
-      ;;
-    *.cfg)
-      if cfg_has_selected_tla_module "$file"; then
-        continue
-      fi
-
-      check_tla_model "$file"
-      ;;
-    *.als)
-      check_alloy_model "$file"
-      ;;
-    esac
-  done < <(unique_files)
-
-  if [[ "$saw_file" -eq 1 ]]; then
-    print_check_summary
-    fail_if_steps_failed
-  else
-    printf "No .tla, .cfg, or .als files found.\n"
-  fi
-}
-
 check_types() {
   local path
   local root
@@ -550,10 +392,6 @@ main() {
   cd "$REPO_ROOT"
 
   case "${1:-}" in
-  specs)
-    shift
-    check_specs "$@"
-    ;;
   types)
     shift
     check_types "$@"
@@ -567,7 +405,7 @@ main() {
     check_knip "$@"
     ;;
   *)
-    die "unknown check target: ${1:-}; use 'just check specs [PATH...]', 'just check types [PATH...]', 'just check dialyzer [PATH...]', or 'just check knip'"
+    die "unknown check target: ${1:-}; use 'just check types [PATH...]', 'just check dialyzer [PATH...]', or 'just check knip'"
     ;;
   esac
 }

@@ -25,7 +25,6 @@ Update:
   just update recipes                  Refresh the managed just recipes
 
 Check:
-  just check specs [PATH...]           Check TLA+ and Alloy specs
   just check types [PATH...]           Typecheck TypeScript apps and Python paths
   just check dialyzer [PATH...]        Run Dialyzer for Elixir apps
   just check knip                      Check unused files, dependencies, and exports

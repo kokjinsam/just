@@ -614,7 +614,7 @@ check_spec_placement() {
 
 run_spec_placement() {
   local path
-  local display_command="check specs live under docs/"
+  local display_command="specs live under docs/"
   local target="."
   local -a paths=()
 

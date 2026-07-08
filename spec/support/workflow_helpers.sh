@@ -513,36 +513,6 @@ exit "${JUST_FAKE_PROCESS_COMPOSE_STATUS:-0}"
 '
 
   # shellcheck disable=SC2016
-  write_fake_command "$fake_bin/sany" '
-printf "sany\t%s" "$PWD" >> "$JUST_FAKE_LOG"
-for arg in "$@"; do
-  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
-done
-printf "\n" >> "$JUST_FAKE_LOG"
-exit "${JUST_FAKE_SANY_STATUS:-0}"
-'
-
-  # shellcheck disable=SC2016
-  write_fake_command "$fake_bin/tlc" '
-printf "tlc\t%s" "$PWD" >> "$JUST_FAKE_LOG"
-for arg in "$@"; do
-  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
-done
-printf "\n" >> "$JUST_FAKE_LOG"
-exit "${JUST_FAKE_TLC_STATUS:-0}"
-'
-
-  # shellcheck disable=SC2016
-  write_fake_command "$fake_bin/alloy" '
-printf "alloy\t%s" "$PWD" >> "$JUST_FAKE_LOG"
-for arg in "$@"; do
-  printf "\t%s" "$arg" >> "$JUST_FAKE_LOG"
-done
-printf "\n" >> "$JUST_FAKE_LOG"
-exit "${JUST_FAKE_ALLOY_STATUS:-0}"
-'
-
-  # shellcheck disable=SC2016
   write_fake_command "$fake_bin/vacuum" '
 printf "vacuum\t%s" "$PWD" >> "$JUST_FAKE_LOG"
 for arg in "$@"; do
@@ -581,7 +551,6 @@ run_wrapper() {
         JUST_CONFIG="$fixture/just.yaml" \
         JUST_CALLER_DIR="$caller" \
         JUST_FAKE_LOG="$fixture/fake.log" \
-        JUST_FAKE_ALLOY_STATUS="${JUST_FAKE_ALLOY_STATUS:-0}" \
         JUST_FAKE_JAVA_STATUS="${JUST_FAKE_JAVA_STATUS:-0}" \
         JUST_FAKE_MIX_DIALYZER_STATUS="${JUST_FAKE_MIX_DIALYZER_STATUS:-0}" \
         JUST_FAKE_MIX_FORMAT_CHECK_STATUS="${JUST_FAKE_MIX_FORMAT_CHECK_STATUS:-0}" \
@@ -594,8 +563,6 @@ run_wrapper() {
         JUST_FAKE_PYREFLY_STATUS="${JUST_FAKE_PYREFLY_STATUS:-0}" \
         JUST_FAKE_RUFF_FORMAT_STATUS="${JUST_FAKE_RUFF_FORMAT_STATUS:-0}" \
         JUST_FAKE_RUFF_CHECK_STATUS="${JUST_FAKE_RUFF_CHECK_STATUS:-0}" \
-        JUST_FAKE_SANY_STATUS="${JUST_FAKE_SANY_STATUS:-0}" \
-        JUST_FAKE_TLC_STATUS="${JUST_FAKE_TLC_STATUS:-0}" \
         JUST_FAKE_VACUUM_STATUS="${JUST_FAKE_VACUUM_STATUS:-0}" \
         TLA2TOOLS_JAR="$fixture/tla2tools.jar" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
@@ -938,7 +905,7 @@ test_lint_enforces_spec_placement() {
   assert_output_contains "$output" "[info] configured spec placement: docs/" || return
   assert_output_contains "$output" "Spec files must live under docs/: scripts/Misplaced.tla" || return
   assert_output_contains "$output" "Spec files must live under docs/: openapi.yaml" || return
-  assert_output_contains "$output" "[error] [check specs live under docs/] [docs/] ." || return
+  assert_output_contains "$output" "[error] [specs live under docs/] [docs/] ." || return
 }
 
 test_default_lint_runs_vacuum_for_openapi_specs() {
@@ -1198,73 +1165,6 @@ test_format_check_aggregates_ruff_failures() {
   assert_output_contains "$output" "[info] [mix format --check-formatted mix.exs] [apps/api/.formatter.exs] apps/api/mix.exs" || return
   assert_log_entry "$fixture" ruff "$fixture" format --check scripts/foo.py || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted mix.exs || return
-}
-
-test_check_specs_uses_asdf_shims() {
-  local fixture
-  local output
-  local status
-
-  fixture="$(new_fixture)"
-  cat >"$fixture/docs/specs/Example.tla" <<'TLA'
----- MODULE Example ----
-VARIABLE x
-Init == x = 0
-Next == x' = x
-====
-TLA
-  printf "INIT Init\nNEXT Next\n" >"$fixture/docs/specs/Example.cfg"
-  printf "sig Example {}\nrun {} for 1\n" >"$fixture/docs/specs/Structure.als"
-
-  run_wrapper status output "$fixture" "$fixture" check specs docs/specs
-
-  assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "== Summary ==" || return
-  assert_output_contains "$output" "[info] [sany docs/specs/Example.tla] [tlaplus] docs/specs/Example.tla" || return
-  assert_output_contains "$output" "[info] [tlc -config docs/specs/Example.cfg docs/specs/Example.tla] [tlaplus] docs/specs/Example.cfg" || return
-  assert_output_contains "$output" "[info] [alloy commands docs/specs/Structure.als] [alloy] docs/specs/Structure.als" || return
-  assert_output_not_contains "$output" "Command summary" || return
-  assert_log_entry "$fixture" sany "$fixture" docs/specs/Example.tla || return
-  assert_log_entry "$fixture" tlc "$fixture" -config docs/specs/Example.cfg docs/specs/Example.tla || return
-  assert_log_entry "$fixture" alloy "$fixture" commands docs/specs/Structure.als || return
-}
-
-test_check_specs_directory_discovery_uses_gitignore() {
-  local fixture
-  local output
-  local status
-
-  fixture="$(new_fixture)"
-  init_git_fixture "$fixture"
-  mkdir -p "$fixture/docs/specs/generated"
-  printf "generated/\n" >"$fixture/docs/specs/.gitignore"
-  printf -- "---- MODULE Included ----\n====\n" >"$fixture/docs/specs/Included.tla"
-  printf -- "---- MODULE Ignored ----\n====\n" >"$fixture/docs/specs/generated/Ignored.tla"
-  printf -- "---- MODULE Tracked ----\n====\n" >"$fixture/docs/specs/generated/Tracked.tla"
-  git -C "$fixture" add -f docs/specs/generated/Tracked.tla
-
-  run_wrapper status output "$fixture" "$fixture" check specs docs/specs
-
-  assert_status 0 "$status" "$output" || return
-  assert_file_contains "$fixture/fake.log" "docs/specs/Included.tla" || return
-  assert_file_contains "$fixture/fake.log" "docs/specs/generated/Tracked.tla" || return
-  assert_log_not_contains "$fixture" "docs/specs/generated/Ignored.tla" || return
-}
-
-test_check_specs_does_not_lint_openapi_specs() {
-  local fixture
-  local output
-  local status
-
-  fixture="$(new_fixture)"
-  mkdir -p "$fixture/docs/api"
-  printf "openapi: 3.1.0\ninfo:\n  title: API\n  version: 1.0.0\npaths: {}\n" >"$fixture/docs/api/openapi.yaml"
-
-  run_wrapper status output "$fixture" "$fixture" check specs docs/api/openapi.yaml
-
-  assert_status 0 "$status" "$output" || return
-  assert_output_contains "$output" "No .tla, .cfg, or .als files found." || return
-  assert_log_not_contains "$fixture" "vacuum" || return
 }
 
 test_check_types_uses_compact_summary() {

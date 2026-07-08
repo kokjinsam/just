@@ -151,21 +151,6 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
-  It "checks formal specs through asdf shims"
-    When call test_check_specs_uses_asdf_shims
-    The status should equal 0
-  End
-
-  It "checks spec directory selections through git-aware discovery"
-    When call test_check_specs_directory_discovery_uses_gitignore
-    The status should equal 0
-  End
-
-  It "leaves OpenAPI linting to lint"
-    When call test_check_specs_does_not_lint_openapi_specs
-    The status should equal 0
-  End
-
   It "checks TypeScript apps with compact summary"
     When call test_check_types_uses_compact_summary
     The status should equal 0
