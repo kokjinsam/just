@@ -228,15 +228,33 @@ TEXT
 write_mix_exs() {
   local mix_exs="$1"
   local include_uniq="${2:-0}"
+  local app="${3:-api}"
+  local module="Api"
+  local uniq_dependency=""
+
+  case "$app" in
+  admin)
+    module="Admin"
+    ;;
+  api)
+    module="Api"
+    ;;
+  *)
+    module="App"
+    ;;
+  esac
 
   if [[ "$include_uniq" -eq 1 ]]; then
-    cat >"$mix_exs" <<'ELIXIR'
-defmodule Api.MixProject do
+    uniq_dependency='        {:uniq, "0.6.3"}'
+  fi
+
+  cat >"$mix_exs" <<ELIXIR
+defmodule ${module}.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :api,
+      app: :${app},
       version: "0.1.0",
       deps: deps()
     ]
@@ -248,41 +266,14 @@ defmodule Api.MixProject do
       [
         {:ex_slop, "0.4.2", only: [:dev, :test], runtime: false},
         {:excellent_migrations, "~> 0.1.10", only: [:dev, :test], runtime: false},
-        {:code_style, path: "../../../../code_style", only: [:dev, :test], runtime: false},
+        {:code_style, github: "kokjinsam/code_style", only: [:dev, :test], runtime: false},
         {:styler, "~> 1.5", only: [:dev, :test], runtime: false},
         {:phoenix, "~> 1.8"},
-        {:uniq, "0.6.3"}
+${uniq_dependency}
       ]
     end
   end
 ELIXIR
-  else
-    cat >"$mix_exs" <<'ELIXIR'
-defmodule Api.MixProject do
-  use Mix.Project
-
-  def project do
-    [
-      app: :api,
-      version: "0.1.0",
-      deps: deps()
-    ]
-  end
-
-    def application, do: []
-
-    defp deps do
-      [
-        {:ex_slop, "0.4.2", only: [:dev, :test], runtime: false},
-        {:excellent_migrations, "~> 0.1.10", only: [:dev, :test], runtime: false},
-        {:code_style, path: "../../../../code_style", only: [:dev, :test], runtime: false},
-        {:styler, "~> 1.5", only: [:dev, :test], runtime: false},
-        {:phoenix, "~> 1.8"}
-      ]
-    end
-  end
-ELIXIR
-  fi
 }
 
 write_fake_command() {
@@ -316,7 +307,10 @@ new_fixture() {
     "$fixture/apps/api/assets/css" \
     "$fixture/apps/api/assets/js" \
     "$fixture/apps/api/lib" \
+    "$fixture/apps/api/priv/repo/migrations" \
     "$fixture/apps/api/scripts" \
+    "$fixture/apps/admin/lib" \
+    "$fixture/apps/admin/priv/repo/migrations" \
     "$fixture/apps/workspace/src" \
     "$fixture/apps/website/src" \
     "$fixture/.just/bin" \
@@ -327,6 +321,8 @@ new_fixture() {
 apps:
   api:
     path: apps/api
+  admin:
+    path: apps/admin
   workspace:
     path: apps/workspace
   website:
@@ -367,6 +363,12 @@ ELIXIR
   printf "[plugins: [Phoenix.LiveView.HTMLFormatter, Styler]]\n" >"$fixture/apps/api/.formatter.exs"
   printf "defmodule Api do\nend\n" >"$fixture/apps/api/lib/api.ex"
   write_mix_exs "$fixture/apps/api/mix.exs"
+  cp "$fixture/apps/api/.credo.exs" "$fixture/apps/admin/.credo.exs"
+  printf "[plugins: [Phoenix.LiveView.HTMLFormatter, Styler]]\n" >"$fixture/apps/admin/.formatter.exs"
+  printf "defmodule Admin do\nend\n" >"$fixture/apps/admin/lib/admin.ex"
+  touch "$fixture/apps/api/priv/repo/migrations/.keep"
+  touch "$fixture/apps/admin/priv/repo/migrations/.keep"
+  write_mix_exs "$fixture/apps/admin/mix.exs" 0 admin
   printf '{"scripts":{"build":"vite build","test":"vitest run","typecheck":"tsgo --noEmit"}}\n' >"$fixture/apps/workspace/package.json"
   printf "export const main = 1\n" >"$fixture/apps/workspace/src/main.tsx"
   printf "export const secondary = 2\n" >"$fixture/apps/workspace/src/secondary.ts"
@@ -703,14 +705,17 @@ test_default_format_summary_uses_repo_defaults() {
   assert_output_contains "$output" "[info] configured oxfmt: .oxfmtrc.json" || return
   assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
   assert_output_contains "$output" "[info] configured mix format: apps/api/.formatter.exs" || return
+  assert_output_contains "$output" "[info] configured mix format: apps/admin/.formatter.exs" || return
   assert_output_contains "$output" "[info] [pnpm exec oxfmt --check] [.oxfmtrc.json] configured files" || return
   assert_output_contains "$output" "[info] [ruff format --check] [ruff.toml] configured files" || return
   assert_output_contains "$output" "[info] [mix format --check-formatted] [apps/api/.formatter.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix format --check-formatted] [apps/admin/.formatter.exs] apps/admin" || return
   assert_output_not_contains "$output" "Command summary" || return
   assert_output_not_contains "$output" "files:" || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check || return
   assert_log_entry "$fixture" ruff "$fixture" format --check || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" format --check-formatted || return
   assert_log_not_contains "$fixture" ".just/" || return
 }
 
@@ -833,6 +838,7 @@ test_elixir_app_directory_uses_available_formatters() {
   assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check --no-error-on-unmatched-pattern apps/api || return
   assert_log_entry "$fixture" ruff "$fixture" format --check apps/api/scripts/tool.py || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted || return
+  assert_log_not_contains "$fixture" "$fixture/apps/admin"$'\tformat' || return
 }
 
 test_format_directory_discovery_uses_gitignore() {
@@ -865,6 +871,7 @@ test_default_format_missing_configs_skips_without_failure() {
   rm "$fixture/.oxfmtrc.json"
   rm "$fixture/ruff.toml"
   rm "$fixture/apps/api/.formatter.exs"
+  rm "$fixture/apps/admin/.formatter.exs"
 
   run_wrapper status output "$fixture" "$fixture" format --check
 
@@ -872,9 +879,11 @@ test_default_format_missing_configs_skips_without_failure() {
   assert_output_contains "$output" "[warning] unconfigured oxfmt: no .oxfmtrc.json found" || return
   assert_output_contains "$output" "[warning] unconfigured ruff: no ruff.toml, .ruff.toml, or pyproject.toml config found" || return
   assert_output_contains "$output" "[warning] unconfigured mix format: no .formatter.exs found for apps/api" || return
+  assert_output_contains "$output" "[warning] unconfigured mix format: no .formatter.exs found for apps/admin" || return
   assert_output_contains "$output" "[warning] [skipped] [pnpm exec oxfmt --check] [no config] configured files" || return
   assert_output_contains "$output" "[warning] [skipped] [ruff format --check] [no config] configured files" || return
   assert_output_contains "$output" "[warning] [skipped] [mix format --check-formatted] [no config] apps/api" || return
+  assert_output_contains "$output" "[warning] [skipped] [mix format --check-formatted] [no config] apps/admin" || return
   assert_log_not_contains "$fixture" "pnpm" || return
   assert_log_not_contains "$fixture" "ruff" || return
   assert_log_not_contains "$fixture" "mix" || return
@@ -895,8 +904,11 @@ test_default_lint_summary_uses_repo_defaults() {
   assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
   assert_output_contains "$output" "[info] configured stylelint: stylelint.config.js" || return
   assert_output_contains "$output" "[info] configured mix format: apps/api/.formatter.exs" || return
+  assert_output_contains "$output" "[info] configured mix format: apps/admin/.formatter.exs" || return
   assert_output_contains "$output" "[info] configured credo: apps/api/.credo.exs" || return
+  assert_output_contains "$output" "[info] configured credo: apps/admin/.credo.exs" || return
   assert_output_contains "$output" "[info] [mix credo --strict] [apps/api/.credo.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix credo --strict] [apps/admin/.credo.exs] apps/admin" || return
   assert_output_contains "$output" "[info] [pnpm exec oxlint] [oxlint.config.ts] configured files" || return
   assert_output_contains "$output" "[info] [ruff check] [ruff.toml] configured files" || return
   assert_output_contains "$output" "[info] [pnpm exec stylelint .] [stylelint.config.js] configured files" || return
@@ -906,6 +918,8 @@ test_default_lint_summary_uses_repo_defaults() {
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
   assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" credo --strict || return
   assert_log_not_contains "$fixture" ".just/" || return
 }
 
@@ -994,6 +1008,7 @@ test_elixir_app_lint_directory_uses_available_linters() {
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/api/assets/js/app.ts || return
   assert_log_entry "$fixture" ruff "$fixture" check apps/api/scripts/tool.py || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
+  assert_log_not_contains "$fixture" "$fixture/apps/admin"$'\tcredo' || return
 }
 
 test_elixir_app_lint_directory_discovery_uses_gitignore() {
@@ -1028,6 +1043,7 @@ test_lint_repo_root_selector_runs_default_contract() {
 
   assert_status 0 "$status" "$output" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" credo --strict || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
   assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
@@ -1115,6 +1131,7 @@ test_lint_aggregates_after_failing_sobelow() {
 
   assert_nonzero_status "$status" "$output" || return
   assert_output_contains "$output" "[error] [mix sobelow --private --exit --threshold high] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[error] [mix sobelow --private --exit --threshold high] [apps/admin/mix.exs] apps/admin" || return
   assert_output_contains "$output" "[info] [check ExSlop Dependency] [apps/api/mix.exs] {:ex_slop, ...} in mix.exs" || return
   assert_output_contains "$output" "[info] [check ExSlop Credo Plugin] [apps/api/.credo.exs] {ExSlop, ...} in .credo.exs plugins" || return
   assert_output_contains "$output" "[info] [check ExcellentMigrations Dependency] [apps/api/mix.exs] {:excellent_migrations, ...} in mix.exs" || return
@@ -1129,6 +1146,7 @@ test_lint_aggregates_after_failing_sobelow() {
   assert_log_not_contains "$fixture" "ex_slop" || return
   assert_log_not_contains "$fixture" "dialyzer" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" reach.check --arch --smells --strict || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" reach.check --arch --smells --strict || return
   assert_log_entry "$fixture" pnpm "$fixture" exec oxlint || return
   assert_log_entry "$fixture" ruff "$fixture" check || return
   assert_log_entry "$fixture" pnpm "$fixture" exec stylelint . || return
@@ -1298,10 +1316,29 @@ test_check_dialyzer_uses_elixir_roots() {
 
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "[info] configured dialyzer: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] configured dialyzer: apps/admin/mix.exs" || return
   assert_output_contains "$output" "[info] [mix dialyzer --format short] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix dialyzer --format short] [apps/admin/mix.exs] apps/admin" || return
   assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" dialyzer --format short || return
   assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_check_dialyzer_selected_path_uses_only_matching_elixir_root() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" check dialyzer apps/api/lib/api.ex
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] [mix dialyzer --format short] [apps/api/mix.exs] apps/api" || return
+  assert_output_not_contains "$output" "apps/admin/mix.exs" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
+  assert_log_not_contains "$fixture" "$fixture/apps/admin"$'\tdialyzer' || return
 }
 
 test_check_dialyzer_reports_failures() {
@@ -1315,7 +1352,9 @@ test_check_dialyzer_reports_failures() {
 
   assert_nonzero_status "$status" "$output" || return
   assert_output_contains "$output" "[error] [mix dialyzer --format short] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[error] [mix dialyzer --format short] [apps/admin/mix.exs] apps/admin" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" dialyzer --format short || return
 }
 
 test_check_knip_uses_compact_summary() {
@@ -1347,6 +1386,7 @@ test_install_runs_project_dependency_installs() {
   assert_output_contains "$output" "[ok] Install Elixir Deps" || return
   assert_output_contains "$output" "[ok] Install Node Deps" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" deps.get || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" deps.get || return
   assert_log_entry "$fixture" pnpm "$fixture" --config.confirmModulesPurge=false install || return
 }
 
@@ -1367,30 +1407,63 @@ test_install_npm_dep_uses_direct_selector() {
   assert_log_entry "$fixture" pnpm "$fixture" --config.confirmModulesPurge=false --filter ./apps/workspace add lucide-react@0.475.0 || return
 }
 
+test_migrate_db_runs_for_elixir_apps_with_migrations() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" migrate db
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[ok] Migrate DB" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" ecto.migrate || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" ecto.migrate || return
+}
+
+test_reset_db_runs_for_elixir_apps_with_migrations() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" reset db
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[ok] Reset DB" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" ecto.reset || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" ecto.reset || return
+}
+
 test_install_hex_dep_uses_temp_mix_exs_and_compact_summary() {
   local fixture
   local output
   local status
-  local mix_exs
+  local api_mix_exs
+  local admin_mix_exs
   local expected_log
 
   fixture="$(new_fixture)"
-  mix_exs="$fixture/apps/api/mix.exs"
+  api_mix_exs="$fixture/apps/api/mix.exs"
+  admin_mix_exs="$fixture/apps/admin/mix.exs"
   expected_log="$(mktemp "$fixture/expected.log.XXXXXX")"
 
-  run_wrapper status output "$fixture" "$fixture" install hex:uniq 0.6.3 --app api
+  run_wrapper status output "$fixture" "$fixture" install hex:uniq 0.6.3 --app admin
 
   assert_status 0 "$status" "$output" || return
-  assert_file_contains "$mix_exs" "{:uniq, \"0.6.3\"}" || return
+  assert_file_not_contains "$api_mix_exs" ":uniq" || return
+  assert_file_contains "$admin_mix_exs" "{:uniq, \"0.6.3\"}" || return
   assert_output_contains "$output" "[ok] Add Hex Dependency" || return
   assert_output_contains "$output" "cmd: elixir ../../.just/lib/install_hex_dep.exs mix.exs uniq 0.6.3" || return
-  assert_output_contains "$output" "app: api" || return
+  assert_output_contains "$output" "app: admin" || return
   assert_output_contains "$output" "package: hex:uniq" || return
   assert_output_contains "$output" "version: 0.6.3" || return
   {
-    log_line mix "$fixture/apps/api" format mix.exs
+    log_line mix "$fixture/apps/admin" format mix.exs
     printf "\n"
-    log_line mix "$fixture/apps/api" deps.get
+    log_line mix "$fixture/apps/admin" deps.get
     printf "\n"
   } >"$expected_log"
   assert_log_equals "$fixture" "$expected_log" || return
@@ -1432,29 +1505,33 @@ test_remove_hex_dep_uses_temp_mix_exs_and_leaves_parsable_elixir() {
   local fixture
   local output
   local status
-  local mix_exs
+  local api_mix_exs
+  local admin_mix_exs
   local expected_log
 
   fixture="$(new_fixture)"
-  mix_exs="$fixture/apps/api/mix.exs"
+  api_mix_exs="$fixture/apps/api/mix.exs"
+  admin_mix_exs="$fixture/apps/admin/mix.exs"
   expected_log="$(mktemp "$fixture/expected.log.XXXXXX")"
-  write_mix_exs "$mix_exs" 1
+  write_mix_exs "$api_mix_exs" 1 api
+  write_mix_exs "$admin_mix_exs" 1 admin
 
-  run_wrapper status output "$fixture" "$fixture" remove hex:uniq --app api
+  run_wrapper status output "$fixture" "$fixture" remove hex:uniq --app admin
 
   assert_status 0 "$status" "$output" || return
-  assert_file_not_contains "$mix_exs" ":uniq" || return
-  parse_elixir_file "$mix_exs" || return
+  assert_file_contains "$api_mix_exs" "{:uniq, \"0.6.3\"}" || return
+  assert_file_not_contains "$admin_mix_exs" ":uniq" || return
+  parse_elixir_file "$admin_mix_exs" || return
   assert_output_contains "$output" "[ok] Remove Hex Dependency" || return
   assert_output_contains "$output" "cmd: elixir ../../.just/lib/remove_hex_dep.exs mix.exs uniq" || return
-  assert_output_contains "$output" "app: api" || return
+  assert_output_contains "$output" "app: admin" || return
   assert_output_contains "$output" "package: hex:uniq" || return
   {
-    log_line mix "$fixture/apps/api" format mix.exs
+    log_line mix "$fixture/apps/admin" format mix.exs
     printf "\n"
-    log_line mix "$fixture/apps/api" deps.clean uniq --unlock
+    log_line mix "$fixture/apps/admin" deps.clean uniq --unlock
     printf "\n"
-    log_line mix "$fixture/apps/api" deps.unlock --unused
+    log_line mix "$fixture/apps/admin" deps.unlock --unused
     printf "\n"
   } >"$expected_log"
   assert_log_equals "$fixture" "$expected_log" || return
@@ -1472,13 +1549,16 @@ test_test_runs_standard_app_tests() {
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "== Summary ==" || return
   assert_output_contains "$output" "[info] configured mix test: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] configured mix test: apps/admin/mix.exs" || return
   assert_output_contains "$output" "[info] configured node test: apps/workspace/package.json" || return
   assert_output_contains "$output" "[warning] unconfigured node test: no test script in apps/website/package.json" || return
   assert_output_contains "$output" "[info] [mix test] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix test] [apps/admin/mix.exs] apps/admin" || return
   assert_output_contains "$output" "[info] [pnpm run test] [apps/workspace/package.json] apps/workspace" || return
   assert_output_contains "$output" "[warning] [skipped] [pnpm run test] [apps/website/package.json] apps/website" || return
   assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" test || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" test || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run test || return
   assert_log_not_contains "$fixture" "$fixture/apps/website"$'\trun\ttest' || return
 }
@@ -1495,13 +1575,16 @@ test_build_runs_standard_app_builds() {
   assert_status 0 "$status" "$output" || return
   assert_output_contains "$output" "== Summary ==" || return
   assert_output_contains "$output" "[info] configured mix build: apps/api/mix.exs" || return
+  assert_output_contains "$output" "[info] configured mix build: apps/admin/mix.exs" || return
   assert_output_contains "$output" "[info] configured node build: apps/workspace/package.json" || return
   assert_output_contains "$output" "[info] configured node build: apps/website/package.json" || return
   assert_output_contains "$output" "[info] [mix compile --warnings-as-errors] [apps/api/mix.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [mix compile --warnings-as-errors] [apps/admin/mix.exs] apps/admin" || return
   assert_output_contains "$output" "[info] [pnpm run build] [apps/workspace/package.json] apps/workspace" || return
   assert_output_contains "$output" "[info] [pnpm run build] [apps/website/package.json] apps/website" || return
   assert_output_not_contains "$output" "Command summary" || return
   assert_log_entry "$fixture" mix "$fixture/apps/api" compile --warnings-as-errors || return
+  assert_log_entry "$fixture" mix "$fixture/apps/admin" compile --warnings-as-errors || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run build || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/website" run build || return
 }

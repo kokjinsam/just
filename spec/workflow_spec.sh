@@ -181,6 +181,11 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "checks Dialyzer only for the selected Elixir app"
+    When call test_check_dialyzer_selected_path_uses_only_matching_elixir_root
+    The status should equal 0
+  End
+
   It "reports Dialyzer failures"
     When call test_check_dialyzer_reports_failures
     The status should equal 0
@@ -198,6 +203,16 @@ Describe "workflow scripts"
 
   It "adds npm dependencies through a direct install selector"
     When call test_install_npm_dep_uses_direct_selector
+    The status should equal 0
+  End
+
+  It "migrates databases for Elixir apps with migrations"
+    When call test_migrate_db_runs_for_elixir_apps_with_migrations
+    The status should equal 0
+  End
+
+  It "resets databases for Elixir apps with migrations"
+    When call test_reset_db_runs_for_elixir_apps_with_migrations
     The status should equal 0
   End
 
