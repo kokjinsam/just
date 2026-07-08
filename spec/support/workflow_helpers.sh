@@ -976,6 +976,47 @@ test_lint_selected_python_without_config_skips_ruff() {
   assert_log_not_contains "$fixture" "ruff" || return
 }
 
+test_elixir_app_lint_directory_uses_available_linters() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" lint apps/api
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] [mix credo --strict] [apps/api/.credo.exs] apps/api" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxlint apps/api/assets/js/app.ts] [oxlint.config.ts] apps/api/assets/js/app.ts" || return
+  assert_output_contains "$output" "[info] [ruff check apps/api/scripts/tool.py] [ruff.toml] apps/api/scripts/tool.py" || return
+  assert_output_contains "$output" "[info] [pnpm exec stylelint apps/api/assets/css/app.css] [stylelint.config.js] apps/api/assets/css/app.css" || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" credo --strict || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxlint apps/api/assets/js/app.ts || return
+  assert_log_entry "$fixture" ruff "$fixture" check apps/api/scripts/tool.py || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec stylelint apps/api/assets/css/app.css || return
+}
+
+test_elixir_app_lint_directory_discovery_uses_gitignore() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  init_git_fixture "$fixture"
+  mkdir -p "$fixture/apps/api/assets/js/generated"
+  printf "generated/\n" >"$fixture/apps/api/assets/js/.gitignore"
+  printf "export const ignored = 1\n" >"$fixture/apps/api/assets/js/generated/ignored.ts"
+  printf "export const tracked = 1\n" >"$fixture/apps/api/assets/js/generated/tracked.ts"
+  git -C "$fixture" add -f apps/api/assets/js/generated/tracked.ts
+
+  run_wrapper status output "$fixture" "$fixture" lint apps/api
+
+  assert_status 0 "$status" "$output" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/assets/js/app.ts" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/assets/js/generated/tracked.ts" || return
+  assert_log_not_contains "$fixture" "apps/api/assets/js/generated/ignored.ts" || return
+}
+
 test_lint_repo_root_selector_runs_default_contract() {
   local fixture
   local output

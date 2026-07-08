@@ -257,19 +257,9 @@ add_lint_path() {
   fi
 
   if [[ -d "$path" ]]; then
-    if root="$(elixir_root_for_path "$path")"; then
-      if [[ "$path" == "$root" ]]; then
-        add_mix_lint_root "$root"
-
-        if [[ -d "$root/assets/css" ]]; then
-          add_lint_path "$root/assets/css"
-        fi
-
-        return
-      fi
-    fi
-
-    if has_mix_lint_files "$path"; then
+    if root="$(elixir_root_for_path "$path")" && [[ "$path" == "$root" ]]; then
+      add_mix_lint_root "$root"
+    elif has_mix_lint_files "$path"; then
       root="$(elixir_root_for_path "$path")" || root=""
       [[ -n "$root" ]] && add_mix_lint_root "$root"
     fi

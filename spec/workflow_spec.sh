@@ -96,6 +96,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "lints selected Elixir app directories with available linters"
+    When call test_elixir_app_lint_directory_uses_available_linters
+    The status should equal 0
+  End
+
+  It "lints selected Elixir app directories through git-aware discovery"
+    When call test_elixir_app_lint_directory_discovery_uses_gitignore
+    The status should equal 0
+  End
+
   It "runs the default lint contract for the repo-root selector"
     When call test_lint_repo_root_selector_runs_default_contract
     The status should equal 0
