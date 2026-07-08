@@ -256,33 +256,52 @@ add_elixir_format_file() {
   local file="$2"
 
   case "$file" in
-  *.css)
-    add_oxfmt_path "$file"
-    ;;
   *.ex | *.exs | *.heex)
     add_mix_format_file "$root" "$file"
     ;;
+  *)
+    add_non_elixir_format_file "$file"
+    ;;
   esac
+}
+
+add_elixir_format_directory_inputs() {
+  local root="$1"
+  local path="$2"
+  local include_mix_inputs="$3"
+  local file
+
+  while IFS= read -r -d '' file; do
+    case "$file" in
+    *.ex | *.exs | *.heex)
+      if [[ "$include_mix_inputs" -eq 1 ]]; then
+        add_mix_format_file "$root" "$file"
+      fi
+      ;;
+    *.py | *.pyi | *.tla)
+      add_non_elixir_format_file "$file"
+      ;;
+    esac
+  done < <(discover_project_files "$path")
 }
 
 add_elixir_format_path() {
   local root="$1"
   local path="$2"
-  local file
-
-  if [[ "$path" == "$root" ]]; then
-    add_mix_format_root "$root"
-    path="$root/assets/css"
-  fi
 
   if [[ -f "$path" ]]; then
     add_elixir_format_file "$root" "$path"
     return
   fi
 
-  while IFS= read -r -d '' file; do
-    add_elixir_format_file "$root" "$file"
-  done < <(discover_project_files "$path")
+  if [[ "$path" == "$root" ]]; then
+    add_mix_format_root "$root"
+    add_elixir_format_directory_inputs "$root" "$path" 0
+  else
+    add_elixir_format_directory_inputs "$root" "$path" 1
+  fi
+
+  add_oxfmt_path "$path"
 }
 
 unique_oxfmt_paths() {

@@ -51,6 +51,16 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "formats selected JS paths inside Elixir apps with oxfmt"
+    When call test_elixir_app_js_path_uses_oxfmt
+    The status should equal 0
+  End
+
+  It "formats selected Elixir app directories with available formatters"
+    When call test_elixir_app_directory_uses_available_formatters
+    The status should equal 0
+  End
+
   It "formats directory selections through git-aware discovery"
     When call test_format_directory_discovery_uses_gitignore
     The status should equal 0

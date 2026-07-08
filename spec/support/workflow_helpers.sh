@@ -314,7 +314,9 @@ new_fixture() {
     "$fixture/.vscode" \
     "$fixture/docs/specs" \
     "$fixture/apps/api/assets/css" \
+    "$fixture/apps/api/assets/js" \
     "$fixture/apps/api/lib" \
+    "$fixture/apps/api/scripts" \
     "$fixture/apps/workspace/src" \
     "$fixture/apps/website/src" \
     "$fixture/.just/bin" \
@@ -345,6 +347,8 @@ YAML
   printf "default:\n" >"$fixture/Justfile"
 
   printf "body { color: black; }\n" >"$fixture/apps/api/assets/css/app.css"
+  printf "export const api = 1\n" >"$fixture/apps/api/assets/js/app.ts"
+  printf "print('api')\n" >"$fixture/apps/api/scripts/tool.py"
   printf "print('hello')\n" >"$fixture/scripts/foo.py"
   cat >"$fixture/apps/api/.credo.exs" <<'ELIXIR'
 %{
@@ -794,6 +798,43 @@ test_path_selected_python_without_config_skips_ruff() {
   assert_log_not_contains "$fixture" "ruff" || return
 }
 
+test_elixir_app_js_path_uses_oxfmt() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" format --check apps/api/assets/js/app.ts
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured oxfmt: .oxfmtrc.json" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxfmt --check apps/api/assets/js/app.ts] [.oxfmtrc.json] apps/api/assets/js/app.ts" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check --no-error-on-unmatched-pattern apps/api/assets/js/app.ts || return
+  assert_log_not_contains "$fixture" "mix" || return
+}
+
+test_elixir_app_directory_uses_available_formatters() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_wrapper status output "$fixture" "$fixture" format --check apps/api
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[info] configured oxfmt: .oxfmtrc.json" || return
+  assert_output_contains "$output" "[info] configured ruff: ruff.toml" || return
+  assert_output_contains "$output" "[info] configured mix format: apps/api/.formatter.exs" || return
+  assert_output_contains "$output" "[info] [pnpm exec oxfmt --check apps/api] [.oxfmtrc.json] apps/api" || return
+  assert_output_contains "$output" "[info] [ruff format --check apps/api/scripts/tool.py] [ruff.toml] apps/api/scripts/tool.py" || return
+  assert_output_contains "$output" "[info] [mix format --check-formatted] [apps/api/.formatter.exs] apps/api" || return
+  assert_log_entry "$fixture" pnpm "$fixture" exec oxfmt --check --no-error-on-unmatched-pattern apps/api || return
+  assert_log_entry "$fixture" ruff "$fixture" format --check apps/api/scripts/tool.py || return
+  assert_log_entry "$fixture" mix "$fixture/apps/api" format --check-formatted || return
+}
+
 test_format_directory_discovery_uses_gitignore() {
   local fixture
   local output
@@ -801,18 +842,18 @@ test_format_directory_discovery_uses_gitignore() {
 
   fixture="$(new_fixture)"
   init_git_fixture "$fixture"
-  mkdir -p "$fixture/apps/api/assets/css/generated"
-  printf "generated/\n" >"$fixture/apps/api/assets/css/.gitignore"
-  printf "body { color: red; }\n" >"$fixture/apps/api/assets/css/generated/ignored.css"
-  printf "body { color: green; }\n" >"$fixture/apps/api/assets/css/generated/tracked.css"
-  git -C "$fixture" add -f apps/api/assets/css/generated/tracked.css
+  mkdir -p "$fixture/apps/api/scripts/generated"
+  printf "generated/\n" >"$fixture/apps/api/scripts/.gitignore"
+  printf "print('ignored')\n" >"$fixture/apps/api/scripts/generated/ignored.py"
+  printf "print('tracked')\n" >"$fixture/apps/api/scripts/generated/tracked.py"
+  git -C "$fixture" add -f apps/api/scripts/generated/tracked.py
 
   run_wrapper status output "$fixture" "$fixture" format --check apps/api
 
   assert_status 0 "$status" "$output" || return
-  assert_file_contains "$fixture/fake.log" "apps/api/assets/css/app.css" || return
-  assert_file_contains "$fixture/fake.log" "apps/api/assets/css/generated/tracked.css" || return
-  assert_log_not_contains "$fixture" "apps/api/assets/css/generated/ignored.css" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/scripts/tool.py" || return
+  assert_file_contains "$fixture/fake.log" "apps/api/scripts/generated/tracked.py" || return
+  assert_log_not_contains "$fixture" "apps/api/scripts/generated/ignored.py" || return
 }
 
 test_default_format_missing_configs_skips_without_failure() {
