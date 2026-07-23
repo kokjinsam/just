@@ -538,15 +538,17 @@ run_wrapper() {
   local command="$5"
   local __captured_output
   local __captured_status
+  local command_path
 
   shift 5
   __captured_output="$(mktemp "$fixture/output.$command.XXXXXX")"
+  command_path="${JUST_TEST_COMMAND_PATH:-$fixture/fake-bin:$PATH}"
 
   set +e
   (
     cd "$caller" &&
       env \
-        PATH="$fixture/fake-bin:$PATH" \
+        PATH="$command_path" \
         REPO_ROOT="$fixture" \
         JUST_CONFIG="$fixture/just.yaml" \
         JUST_CALLER_DIR="$caller" \
@@ -566,6 +568,34 @@ run_wrapper() {
         JUST_FAKE_VACUUM_STATUS="${JUST_FAKE_VACUUM_STATUS:-0}" \
         TLA2TOOLS_JAR="$fixture/tla2tools.jar" \
         bash "$DOT_JUST_ROOT/commands/$command" "$@"
+  ) >"$__captured_output" 2>&1
+  __captured_status="$?"
+  set -e
+
+  printf -v "$__status_var" "%s" "$__captured_status"
+  printf -v "$__output_var" "%s" "$__captured_output"
+}
+
+run_workflow() {
+  local __status_var="$1"
+  local __output_var="$2"
+  local fixture="$3"
+  local __captured_output
+  local __captured_status
+
+  shift 3
+  __captured_output="$(mktemp "$fixture/output.workflow.XXXXXX")"
+
+  set +e
+  (
+    cd "$fixture" &&
+      env \
+        PATH="$fixture/fake-bin:$PATH" \
+        REPO_ROOT="$fixture" \
+        JUST_CONFIG="$fixture/just.yaml" \
+        JUST_CALLER_DIR="$fixture" \
+        JUST_FAKE_LOG="$fixture/fake.log" \
+        bash "$DOT_JUST_ROOT/bin/workflow" "$@"
   ) >"$__captured_output" 2>&1
   __captured_status="$?"
   set -e
@@ -620,6 +650,121 @@ parse_elixir_file() {
   local file="$1"
 
   elixir -e 'Code.string_to_quoted!(File.read!(List.first(System.argv())))' "$file" >/dev/null
+}
+
+test_unknown_dispatcher_command_fails() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+
+  run_workflow status output "$fixture" does-not-exist
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: unknown command: does-not-exist" || return
+  assert_output_contains "$output" "Project Dev Tools" || return
+}
+
+test_missing_config_fails_before_app_discovery() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm "$fixture/just.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" test
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: missing just.yaml at $fixture/just.yaml" || return
+  assert_log_equals "$fixture" /dev/null || return
+}
+
+test_unusable_config_fails_before_app_discovery() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n" >"$fixture/just.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" test
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: just.yaml has no usable apps.<name>.path entries" || return
+  assert_log_equals "$fixture" /dev/null || return
+}
+
+test_partial_app_config_fails_before_external_tools() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  cat >"$fixture/just.yaml" <<'YAML'
+apps:
+  api:
+    path: apps/api
+  broken:
+    enabled: true
+YAML
+
+  run_wrapper status output "$fixture" "$fixture" test
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: app 'broken' has no usable path" || return
+  assert_log_equals "$fixture" /dev/null || return
+}
+
+test_missing_app_path_fails_before_app_discovery() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm -rf "$fixture/apps/website"
+
+  run_wrapper status output "$fixture" "$fixture" build
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: app 'website' path does not exist: apps/website" || return
+  assert_log_equals "$fixture" /dev/null || return
+}
+
+test_app_dependent_commands_share_config_validation() {
+  local fixture
+  local invocation
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  rm "$fixture/just.yaml"
+
+  for invocation in "lint" "format" "install" "remove" "migrate db" "reset db"; do
+    # shellcheck disable=SC2086
+    run_wrapper status output "$fixture" "$fixture" $invocation
+    assert_nonzero_status "$status" "$output" || return
+    assert_output_contains "$output" "error: missing just.yaml at $fixture/just.yaml" || return
+  done
+
+  assert_log_equals "$fixture" /dev/null || return
+}
+
+test_valid_config_with_no_test_work_is_successful() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  mkdir "$fixture/apps/empty"
+  printf "apps:\n  empty:\n    path: apps/empty\n" >"$fixture/just.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" test
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "No test commands selected." || return
+  assert_log_equals "$fixture" /dev/null || return
 }
 
 test_root_selector_from_app_resolves_at_repo_root() {
@@ -1189,6 +1334,63 @@ test_check_types_uses_compact_summary() {
   assert_log_entry "$fixture" pyrefly "$fixture" check || return
 }
 
+test_check_types_fails_when_node_is_broken() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  workspace:\n    path: apps/workspace\n" >"$fixture/just.yaml"
+  write_fake_command "$fixture/fake-bin/node" 'exit 42'
+
+  run_wrapper status output "$fixture" "$fixture" check types apps/workspace
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: failed to inspect package script 'typecheck': apps/workspace/package.json" || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_check_types_fails_when_node_is_missing() {
+  local fixture
+  local no_node_bin
+  local output
+  local status
+  local tool
+
+  fixture="$(new_fixture)"
+  no_node_bin="$fixture/no-node-bin"
+  mkdir "$no_node_bin"
+
+  for tool in bash dirname awk; do
+    ln -s "$(command -v "$tool")" "$no_node_bin/$tool"
+  done
+
+  printf "apps:\n  workspace:\n    path: apps/workspace\n" >"$fixture/just.yaml"
+
+  JUST_TEST_COMMAND_PATH="$no_node_bin" run_wrapper status output "$fixture" "$fixture" check types apps/workspace
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: missing required command: node" || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_check_types_absent_script_is_successful_no_work() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  workspace:\n    path: apps/workspace\n" >"$fixture/just.yaml"
+  printf '{"scripts":{}}\n' >"$fixture/apps/workspace/package.json"
+
+  run_wrapper status output "$fixture" "$fixture" check types apps/workspace
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "No type checks selected." || return
+  assert_output_not_contains "$output" "unbound variable" || return
+  assert_log_equals "$fixture" /dev/null || return
+}
+
 test_check_types_runs_pyrefly_for_selected_python() {
   local fixture
   local output
@@ -1223,6 +1425,22 @@ test_check_dialyzer_uses_elixir_roots() {
   assert_log_entry "$fixture" mix "$fixture/apps/api" dialyzer --format short || return
   assert_log_entry "$fixture" mix "$fixture/apps/admin" dialyzer --format short || return
   assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_check_dialyzer_empty_selection_is_successful_no_work() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  workspace:\n    path: apps/workspace\n" >"$fixture/just.yaml"
+
+  run_wrapper status output "$fixture" "$fixture" check dialyzer
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "No Dialyzer checks selected." || return
+  assert_output_not_contains "$output" "unbound variable" || return
+  assert_log_equals "$fixture" /dev/null || return
 }
 
 test_check_dialyzer_selected_path_uses_only_matching_elixir_root() {
@@ -1463,6 +1681,22 @@ test_test_runs_standard_app_tests() {
   assert_log_not_contains "$fixture" "$fixture/apps/website"$'\trun\ttest' || return
 }
 
+test_test_fails_for_malformed_package_json() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  workspace:\n    path: apps/workspace\n" >"$fixture/just.yaml"
+  printf '{"scripts":' >"$fixture/apps/workspace/package.json"
+
+  run_wrapper status output "$fixture" "$fixture" test
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: failed to inspect package script 'test': apps/workspace/package.json" || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
 test_build_runs_standard_app_builds() {
   local fixture
   local output
@@ -1487,6 +1721,40 @@ test_build_runs_standard_app_builds() {
   assert_log_entry "$fixture" mix "$fixture/apps/admin" compile --warnings-as-errors || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/workspace" run build || return
   assert_log_entry "$fixture" pnpm "$fixture/apps/website" run build || return
+}
+
+test_build_fails_for_unreadable_package_json() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  website:\n    path: apps/website\n" >"$fixture/just.yaml"
+  chmod 000 "$fixture/apps/website/package.json"
+
+  run_wrapper status output "$fixture" "$fixture" build
+  chmod 600 "$fixture/apps/website/package.json"
+
+  assert_nonzero_status "$status" "$output" || return
+  assert_output_contains "$output" "error: failed to inspect package script 'build': apps/website/package.json" || return
+  assert_log_not_contains "$fixture" "pnpm" || return
+}
+
+test_build_absent_script_is_successful_skip() {
+  local fixture
+  local output
+  local status
+
+  fixture="$(new_fixture)"
+  printf "apps:\n  website:\n    path: apps/website\n" >"$fixture/just.yaml"
+  printf '{"scripts":{}}\n' >"$fixture/apps/website/package.json"
+
+  run_wrapper status output "$fixture" "$fixture" build
+
+  assert_status 0 "$status" "$output" || return
+  assert_output_contains "$output" "[warning] unconfigured node build: no build script in apps/website/package.json" || return
+  assert_output_contains "$output" "[warning] [skipped] [pnpm run build] [apps/website/package.json] apps/website" || return
+  assert_log_equals "$fixture" /dev/null || return
 }
 
 test_shell_wrapper_format_target_uses_unmatched_pattern_guard() {

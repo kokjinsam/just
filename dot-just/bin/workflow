@@ -14,6 +14,7 @@ help | install | remove | update | check | dev | lint | migrate | format | reset
   ;;
 *)
   printf "error: unknown command: %s\n" "$command" >&2
-  exec bash "$JUST_ROOT/commands/help"
+  bash "$JUST_ROOT/commands/help"
+  exit 1
   ;;
 esac

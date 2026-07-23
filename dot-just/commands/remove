@@ -151,6 +151,7 @@ remove_targets() {
 
 main() {
   cd "$REPO_ROOT"
+  validate_app_config
   remove_targets "$@"
 }
 

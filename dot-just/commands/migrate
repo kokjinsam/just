@@ -22,6 +22,7 @@ migrate_db() {
 
 main() {
   cd "$REPO_ROOT"
+  validate_app_config
 
   case "${1:-}" in
   db)

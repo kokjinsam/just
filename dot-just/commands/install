@@ -148,6 +148,7 @@ install_targets() {
 
 main() {
   cd "$REPO_ROOT"
+  validate_app_config
   install_targets "$@"
 }
 

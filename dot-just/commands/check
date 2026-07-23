@@ -17,25 +17,15 @@ declare -a CHECK_OPERATION_CONFIGS=()
 declare -a CHECK_OPERATION_TARGETS=()
 RUN_DEFAULT_PYREFLY=0
 
-package_has_script() {
-  local root="$1"
-  local script="$2"
-
-  node -e '
-    const fs = require("node:fs");
-    const packagePath = process.argv[1];
-    const script = process.argv[2];
-    const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
-
-    process.exit(pkg.scripts && pkg.scripts[script] ? 0 : 1);
-  ' "$root/package.json" "$script"
-}
-
 add_typecheck_root() {
   local root="$1"
+  local script_status
 
   if package_has_script "$root" typecheck; then
     TYPECHECK_ROOTS+=("$root")
+  else
+    script_status="$?"
+    [[ "$script_status" -eq 1 ]] || die "failed to inspect package script 'typecheck': $(relative_path "$root/package.json")"
   fi
 }
 
@@ -166,6 +156,7 @@ collect_dialyzer_path() {
 unique_typecheck_roots() {
   local root
 
+  [[ "${#TYPECHECK_ROOTS[@]}" -gt 0 ]] || return 0
   printf "%s\n" "${TYPECHECK_ROOTS[@]}" | awk '!seen[$0]++' | while IFS= read -r root; do
     [[ -n "$root" ]] && printf "%s\n" "$root"
   done
@@ -174,6 +165,7 @@ unique_typecheck_roots() {
 unique_pyrefly_paths() {
   local path
 
+  [[ "${#PYREFLY_PATHS[@]}" -gt 0 ]] || return 0
   printf "%s\n" "${PYREFLY_PATHS[@]}" | awk '!seen[$0]++' | while IFS= read -r path; do
     [[ -n "$path" ]] && printf "%s\n" "$path"
   done
@@ -182,6 +174,7 @@ unique_pyrefly_paths() {
 unique_dialyzer_roots() {
   local root
 
+  [[ "${#DIALYZER_ROOTS[@]}" -gt 0 ]] || return 0
   printf "%s\n" "${DIALYZER_ROOTS[@]}" | awk '!seen[$0]++' | while IFS= read -r root; do
     [[ -n "$root" ]] && printf "%s\n" "$root"
   done
@@ -394,10 +387,12 @@ main() {
   case "${1:-}" in
   types)
     shift
+    validate_app_config
     check_types "$@"
     ;;
   dialyzer)
     shift
+    validate_app_config
     check_dialyzer "$@"
     ;;
   knip)

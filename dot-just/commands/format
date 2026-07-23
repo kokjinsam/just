@@ -923,6 +923,7 @@ main() {
   local stop_options=0
 
   cd "$REPO_ROOT"
+  validate_app_config
 
   while [[ "$#" -gt 0 ]]; do
     if [[ "$stop_options" -eq 0 ]]; then

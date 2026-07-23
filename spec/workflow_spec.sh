@@ -11,6 +11,41 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "fails for unknown dispatcher commands"
+    When call test_unknown_dispatcher_command_fails
+    The status should equal 0
+  End
+
+  It "fails before app discovery when just.yaml is missing"
+    When call test_missing_config_fails_before_app_discovery
+    The status should equal 0
+  End
+
+  It "fails before app discovery when just.yaml has no usable app paths"
+    When call test_unusable_config_fails_before_app_discovery
+    The status should equal 0
+  End
+
+  It "fails before external tools when one declared app has no path"
+    When call test_partial_app_config_fails_before_external_tools
+    The status should equal 0
+  End
+
+  It "fails before app discovery when a configured app path is missing"
+    When call test_missing_app_path_fails_before_app_discovery
+    The status should equal 0
+  End
+
+  It "uses the shared config validation in app-dependent commands"
+    When call test_app_dependent_commands_share_config_validation
+    The status should equal 0
+  End
+
+  It "allows valid configuration with no compatible test work"
+    When call test_valid_config_with_no_test_work_is_successful
+    The status should equal 0
+  End
+
   It "resolves repo-root-looking selectors from app directories"
     When call test_root_selector_from_app_resolves_at_repo_root
     The status should equal 0
@@ -156,6 +191,21 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "fails typecheck discovery when Node is broken"
+    When call test_check_types_fails_when_node_is_broken
+    The status should equal 0
+  End
+
+  It "fails typecheck discovery when Node is missing"
+    When call test_check_types_fails_when_node_is_missing
+    The status should equal 0
+  End
+
+  It "skips an absent typecheck script without Bash 3.2 array errors"
+    When call test_check_types_absent_script_is_successful_no_work
+    The status should equal 0
+  End
+
   It "checks selected Python paths with Pyrefly"
     When call test_check_types_runs_pyrefly_for_selected_python
     The status should equal 0
@@ -163,6 +213,11 @@ Describe "workflow scripts"
 
   It "checks Dialyzer for Elixir apps"
     When call test_check_dialyzer_uses_elixir_roots
+    The status should equal 0
+  End
+
+  It "reports no Dialyzer work without Bash 3.2 array errors"
+    When call test_check_dialyzer_empty_selection_is_successful_no_work
     The status should equal 0
   End
 
@@ -226,8 +281,23 @@ Describe "workflow scripts"
     The status should equal 0
   End
 
+  It "fails test discovery for malformed package.json"
+    When call test_test_fails_for_malformed_package_json
+    The status should equal 0
+  End
+
   It "runs standard app build commands"
     When call test_build_runs_standard_app_builds
+    The status should equal 0
+  End
+
+  It "fails build discovery for unreadable package.json"
+    When call test_build_fails_for_unreadable_package_json
+    The status should equal 0
+  End
+
+  It "skips an absent build script"
+    When call test_build_absent_script_is_successful_skip
     The status should equal 0
   End
 

@@ -163,6 +163,7 @@ run_tests() {
   local app
   local root
   local saw_step=0
+  local script_status
 
   while IFS=$'\t' read -r app root; do
     if [[ -f "$root/mix.exs" ]]; then
@@ -179,6 +180,8 @@ run_tests() {
         record_test_config "info" "configured node test: $(relative_path "$root/package.json")"
         collect_test_step "Node Test" "$root" "pnpm run test" "$(relative_path "$root/package.json")" "$(relative_path "$root")" pnpm run test
       else
+        script_status="$?"
+        [[ "$script_status" -eq 1 ]] || die "failed to inspect package script 'test': $(relative_path "$root/package.json")"
         record_test_config "warning" "unconfigured node test: no test script in $(relative_path "$root/package.json")"
         record_skipped_test_operation "pnpm run test" "$(relative_path "$root/package.json")" "$(relative_path "$root")"
       fi
@@ -201,6 +204,7 @@ main() {
   local path
 
   cd "$REPO_ROOT"
+  validate_app_config
 
   if [[ "$#" -eq 0 ]]; then
     select_defaults

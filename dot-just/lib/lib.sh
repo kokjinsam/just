@@ -386,6 +386,14 @@ yaml_app_entries() {
   require_config
 
   awk '
+    function emit_app() {
+      if (app != "") {
+        print app " " path
+        app = ""
+        path = ""
+      }
+    }
+
     function trim(value) {
       gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", value)
       gsub(/^"|"$/, "", value)
@@ -397,14 +405,15 @@ yaml_app_entries() {
     }
 
     /^[^[:space:]][^:]*:[[:space:]]*$/ {
+      emit_app()
       section = $0
       sub(/:.*/, "", section)
       section = trim(section)
-      app = ""
       next
     }
 
     section == "apps" && /^[[:space:]][[:space:]][A-Za-z0-9_.-]+:[[:space:]]*$/ {
+      emit_app()
       line = $0
       sub(/:.*/, "", line)
       app = trim(line)
@@ -417,11 +426,27 @@ yaml_app_entries() {
       sub(/^[^:]*:/, "", line)
       line = trim(line)
 
-      if (line != "") {
-        print app " " line
-      }
+      path = line
+    }
+
+    END {
+      emit_app()
     }
   ' "$JUST_CONFIG"
+}
+
+validate_app_config() {
+  local app
+  local entries
+  local path
+
+  entries="$(yaml_app_entries)"
+  [[ -n "$entries" ]] || die "just.yaml has no usable apps.<name>.path entries"
+
+  while read -r app path; do
+    [[ -n "$path" ]] || die "app '$app' has no usable path"
+    [[ -d "$REPO_ROOT/$path" ]] || die "app '$app' path does not exist: $path"
+  done <<<"$entries"
 }
 
 app_entries() {
@@ -482,13 +507,19 @@ package_has_script() {
   local root="$1"
   local script="$2"
 
+  require_command node
+
   node -e '
     const fs = require("node:fs");
     const packagePath = process.argv[1];
     const script = process.argv[2];
-    const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
 
-    process.exit(pkg.scripts && pkg.scripts[script] ? 0 : 1);
+    try {
+      const pkg = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+      process.exit(pkg.scripts && pkg.scripts[script] ? 0 : 1);
+    } catch (_) {
+      process.exit(2);
+    }
   ' "$root/package.json" "$script"
 }
 
