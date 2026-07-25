@@ -1,0 +1,21 @@
+version: 1
+
+system:
+  specs: docs/specifications
+  tests: tests/application
+
+coverage:
+  lines: 75
+
+targets:
+  api:
+    path: apps/api
+    components:
+      backend:
+        path: .
+      native:
+        path: native/parser
+        coverage:
+          lines: 90
+      web:
+        path: assets

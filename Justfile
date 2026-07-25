@@ -11,9 +11,11 @@ help:
 [positional-arguments]
 format *args:
     @if [[ "$#" -eq 0 ]]; then \
+        cargo fmt --all; \
         just --fmt; \
         shfmt -w {{ shfmt_files }}; \
       elif [[ "$#" -eq 1 && "$1" == "--check" ]]; then \
+        cargo fmt --all -- --check; \
         just --fmt --check; \
         shfmt -d {{ shfmt_files }}; \
       else \
@@ -22,12 +24,14 @@ format *args:
       fi
 
 lint:
+    @cargo clippy --all-targets --all-features -- -D warnings
     @for file in {{ shell_files }}; do \
         bash -n "$file"; \
       done
     @shellcheck -x {{ shell_files }}
 
 test:
+    @cargo test --all-targets
     @shellspec
 
 check:

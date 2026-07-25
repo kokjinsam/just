@@ -1,0 +1,8 @@
+version: 1
+
+coverage:
+  lines: 101
+
+targets:
+  website:
+    path: apps/website
