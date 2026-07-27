@@ -35,16 +35,13 @@ fn every_foundation_command_is_recognized_and_fails_closed() {
             .contains("0 steps · passed")
     );
 
-    for command in [
-        "lint",
-        "typecheck",
-        "compile",
-        "spec",
-        "test",
-        "coverage",
-        "verify",
-        "doctor",
-    ] {
+    for command in ["lint", "doctor"] {
+        let output = run(&[command], &root);
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        assert!(String::from_utf8(output.stderr).unwrap().contains("passed"));
+    }
+
+    for command in ["typecheck", "compile", "spec", "test", "coverage", "verify"] {
         let output = run(&[command], &root);
 
         assert_eq!(output.status.code(), Some(2), "{command}");
@@ -62,11 +59,11 @@ fn applicable_selectors_are_validated_before_the_unavailable_diagnostic() {
     let nested = root.join("apps/api");
 
     let valid = run(&["lint", "@api:web", "assets/src"], &nested);
-    assert_eq!(valid.status.code(), Some(2));
+    assert_eq!(valid.status.code(), Some(0));
     assert!(
         String::from_utf8(valid.stderr)
             .unwrap()
-            .contains("not implemented in milestone 1")
+            .contains("0 steps · passed")
     );
 
     let invalid = run(&["lint", "@unknown"], &nested);
@@ -81,13 +78,13 @@ fn json_mode_keeps_stdout_machine_readable_and_stderr_empty() {
     let root = fixture("valid-components");
     let output = run(&["lint", "@api:web", "--output", "json"], &root);
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
     assert!(output.stderr.is_empty());
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["command"], "lint");
     assert_eq!(report["selectors"], serde_json::json!(["@api:web"]));
-    assert_eq!(report["status"], "unavailable");
+    assert_eq!(report["status"], "passed");
     assert_eq!(report["steps"], serde_json::json!([]));
 }
 
@@ -102,11 +99,11 @@ fn just_caller_dir_controls_workspace_and_path_resolution() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(0));
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .contains("not implemented in milestone 1")
+            .contains("0 steps · passed")
     );
 }
 
@@ -192,7 +189,11 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
             .unwrap();
         assert_eq!(
             output.status.code(),
-            Some(if command == "format" { 0 } else { 2 }),
+            Some(if matches!(command, "format" | "lint" | "doctor") {
+                0
+            } else {
+                2
+            }),
             "{command}"
         );
     }

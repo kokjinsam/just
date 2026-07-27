@@ -201,6 +201,7 @@ impl WorkspaceConfig {
             specs: owned_directory(&root, &raw.system.specs, "system.specs")?,
             tests: owned_directory(&root, &raw.system.tests, "system.tests")?,
         };
+        validate_owner_roots(&system, &targets)?;
 
         Ok(Self {
             root,
@@ -209,6 +210,59 @@ impl WorkspaceConfig {
             targets,
         })
     }
+}
+
+fn validate_owner_roots(
+    system: &SystemPaths,
+    targets: &BTreeMap<String, Target>,
+) -> Result<(), WorkflowError> {
+    if system.specs == system.tests {
+        return Err(owner_root_collision(
+            "system.specs",
+            "system.tests",
+            &system.specs,
+        ));
+    }
+
+    for (system_owner, system_root) in [
+        ("system.specs", &system.specs),
+        ("system.tests", &system.tests),
+    ] {
+        for target in targets.values() {
+            if system_root == &target.root {
+                return Err(owner_root_collision(
+                    system_owner,
+                    &format!("target '@{}'", target.name),
+                    system_root,
+                ));
+            }
+            for component in target
+                .components
+                .iter()
+                .filter(|component| !component.implicit)
+            {
+                if system_root == &component.root {
+                    return Err(owner_root_collision(
+                        system_owner,
+                        &format!(
+                            "component '@{}:{}'",
+                            target.name,
+                            component.name.as_deref().unwrap_or_default()
+                        ),
+                        system_root,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn owner_root_collision(first: &str, second: &str, root: &Path) -> WorkflowError {
+    WorkflowError::Configuration(format!(
+        "owners '{first}' and '{second}' have the same canonical root '{}'",
+        root.display()
+    ))
 }
 
 fn validate_identifier(kind: &str, identifier: &str) -> Result<(), WorkflowError> {

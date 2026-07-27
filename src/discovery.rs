@@ -218,10 +218,15 @@ fn classify(workspace: &Workspace, path: &Path) -> Option<ResourceKind> {
             | ".sobelow-conf"
             | ".ex_dna.exs"
             | ".reach.exs"
+            | "oxlint.config.js"
+            | "oxlint.config.cjs"
+            | "oxlint.config.mjs"
+            | "oxlint.config.ts"
             | "stylelint.config.js"
             | "stylelint.config.cjs"
             | "stylelint.config.mjs"
-            | "stylelint.config.ts",
+            | "stylelint.config.ts"
+            | "dylint.toml",
         ) => Some(ResourceKind::Configuration),
         Some("nextest.toml")
             if path

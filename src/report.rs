@@ -90,6 +90,16 @@ pub fn render_human(report: &Report) -> String {
             status_label(step.status),
             step.duration
         );
+        if let Some(reason) = &step.skip_reason {
+            let _ = writeln!(output, "  {reason}");
+        }
+        if (report.command == "doctor" || step.provider == "specification-placement")
+            && !step.stderr.is_empty()
+        {
+            for line in step.stderr.lines() {
+                let _ = writeln!(output, "  {line}");
+            }
+        }
     }
     let _ = writeln!(
         output,

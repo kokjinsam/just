@@ -20,6 +20,7 @@ pub enum Capability {
     TargetTest,
     SpecCheck,
     ApplicationTest,
+    DoctorCheck,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -51,14 +52,7 @@ pub fn bindings_for_selections(
     workspace: &Workspace,
     selections: &[Selection],
 ) -> Result<Vec<CapabilityBinding>, WorkflowError> {
-    let mut resources = discover_resources(workspace, selections)?;
-    let mut resource_paths = resources
-        .iter()
-        .map(|resource| resource.path.clone())
-        .collect::<HashSet<_>>();
-    add_explicit_ancestor_manifests(workspace, selections, &mut resources, &mut resource_paths)?;
-    resources.sort_by(|left, right| left.path.cmp(&right.path));
-
+    let resources = resources_for_selections(workspace, selections)?;
     let mut bindings = Vec::new();
     let mut seen = HashSet::new();
     let ownership = Ownership::new(&workspace.config);
@@ -76,6 +70,20 @@ pub fn bindings_for_selections(
         }
     }
     Ok(bindings)
+}
+
+pub(crate) fn resources_for_selections(
+    workspace: &Workspace,
+    selections: &[Selection],
+) -> Result<Vec<DiscoveredResource>, WorkflowError> {
+    let mut resources = discover_resources(workspace, selections)?;
+    let mut resource_paths = resources
+        .iter()
+        .map(|resource| resource.path.clone())
+        .collect::<HashSet<_>>();
+    add_explicit_ancestor_manifests(workspace, selections, &mut resources, &mut resource_paths)?;
+    resources.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(resources)
 }
 
 fn add_explicit_ancestor_manifests(
@@ -151,12 +159,16 @@ fn add_direct_configuration_evidence(
             ".reach.exs",
         ],
         ResourceKind::NodeManifest => &[
+            "oxlint.config.js",
+            "oxlint.config.cjs",
+            "oxlint.config.mjs",
+            "oxlint.config.ts",
             "stylelint.config.js",
             "stylelint.config.cjs",
             "stylelint.config.mjs",
             "stylelint.config.ts",
         ],
-        ResourceKind::CargoManifest => &[".config/nextest.toml"],
+        ResourceKind::CargoManifest => &[".config/nextest.toml", "dylint.toml"],
         _ => &[],
     };
     for name in names {
@@ -248,7 +260,12 @@ fn configuration_manifest_kind(path: &Path) -> Option<ResourceKind> {
         Some(".formatter.exs" | ".credo.exs" | ".sobelow-conf" | ".ex_dna.exs" | ".reach.exs") => {
             Some(ResourceKind::MixManifest)
         }
-        Some(name) if name.starts_with("stylelint.config.") => Some(ResourceKind::NodeManifest),
+        Some(name)
+            if name.starts_with("oxlint.config.") || name.starts_with("stylelint.config.") =>
+        {
+            Some(ResourceKind::NodeManifest)
+        }
+        Some("dylint.toml") => Some(ResourceKind::CargoManifest),
         Some("nextest.toml")
             if path
                 .parent()
@@ -287,7 +304,7 @@ fn bindings_for_resource(
     match resource.kind {
         ResourceKind::MixManifest => Ok(mix_bindings(resource, resources)),
         ResourceKind::NodeManifest => node_bindings(resource, resources),
-        ResourceKind::CargoManifest => Ok(rust_bindings(resource, resources)),
+        ResourceKind::CargoManifest => rust_bindings(resource, resources),
         ResourceKind::Specification if is_tla_file(&resource.path) => Ok(vec![
             direct_binding(resource, Capability::Format, "tla-format"),
             direct_binding(resource, Capability::FormatCheck, "tla-format"),
@@ -426,7 +443,7 @@ fn node_bindings(
             Capability::Lint,
             "oxlint",
             &configs,
-            "",
+            "oxlint.config.",
         ));
     }
     if has_dependency("stylelint")
@@ -460,14 +477,14 @@ fn node_bindings(
 fn rust_bindings(
     resource: &DiscoveredResource,
     resources: &[DiscoveredResource],
-) -> Vec<CapabilityBinding> {
+) -> Result<Vec<CapabilityBinding>, WorkflowError> {
     let root = resource
         .path
         .parent()
         .unwrap_or(Path::new(""))
         .to_path_buf();
     let configs = configurations_for_manifest(resource, resources);
-    vec![
+    let mut bindings = vec![
         binding(resource, &root, Capability::Format, "rustfmt", &configs, ""),
         binding(
             resource,
@@ -494,7 +511,156 @@ fn rust_bindings(
             &configs,
             "nextest.toml",
         ),
-    ]
+    ];
+    if let Some(declarations) = dylint_declaration(&resource.path, &configs)? {
+        let mut dylint = binding(
+            resource,
+            &root,
+            Capability::Lint,
+            "dylint",
+            &configs,
+            "dylint.toml",
+        );
+        dylint.configuration_files = declarations;
+        dylint.configuration_files.extend(
+            configs
+                .iter()
+                .filter(|path| path.file_name().is_some_and(|name| name == "dylint.toml"))
+                .cloned(),
+        );
+        dylint.configuration_files.sort();
+        dylint.configuration_files.dedup();
+        bindings.push(dylint);
+    }
+    Ok(bindings)
+}
+
+pub fn dylint_declaration(
+    cargo_manifest: &Path,
+    configurations: &[PathBuf],
+) -> Result<Option<Vec<PathBuf>>, WorkflowError> {
+    let dylint_configs = configurations
+        .iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == "dylint.toml"));
+    let mut declarations = Vec::new();
+    for path in std::iter::once(cargo_manifest).chain(dylint_configs.map(PathBuf::as_path)) {
+        let source = fs::read_to_string(path).map_err(|error| {
+            WorkflowError::Discovery(format!(
+                "cannot read Dylint configuration '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let document: toml::Value = toml::from_str(&source).map_err(|error| {
+            WorkflowError::Discovery(format!(
+                "cannot parse Dylint configuration '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let Some(dylint) = document
+            .get("workspace")
+            .and_then(|value| value.get("metadata"))
+            .and_then(|value| value.get("dylint"))
+        else {
+            continue;
+        };
+        let Some(libraries) = dylint.get("libraries") else {
+            return Err(WorkflowError::Discovery(format!(
+                "Dylint declaration in '{}' is incomplete: \
+                 workspace.metadata.dylint.libraries is required",
+                path.display()
+            )));
+        };
+        let libraries = libraries.as_array().ok_or_else(|| {
+            WorkflowError::Discovery(format!(
+                "Dylint declaration in '{}' is malformed: \
+                 workspace.metadata.dylint.libraries must be an array",
+                path.display()
+            ))
+        })?;
+        if libraries.is_empty() {
+            return Err(WorkflowError::Discovery(format!(
+                "Dylint declaration in '{}' is empty: \
+                 workspace.metadata.dylint.libraries must contain at least one library",
+                path.display()
+            )));
+        }
+        for (index, library) in libraries.iter().enumerate() {
+            validate_dylint_library(path, index, library)?;
+        }
+        declarations.push(path.to_path_buf());
+    }
+    Ok((!declarations.is_empty()).then_some(declarations))
+}
+
+fn validate_dylint_library(
+    path: &Path,
+    index: usize,
+    library: &toml::Value,
+) -> Result<(), WorkflowError> {
+    let table = library.as_table().ok_or_else(|| {
+        WorkflowError::Discovery(format!(
+            "Dylint declaration in '{}' is malformed: library {} must be a Cargo-style table",
+            path.display(),
+            index + 1
+        ))
+    })?;
+    let sources = ["git", "path"]
+        .into_iter()
+        .filter(|key| table.contains_key(*key))
+        .collect::<Vec<_>>();
+    if sources.len() != 1
+        || table
+            .get(sources.first().copied().unwrap_or(""))
+            .and_then(toml::Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(WorkflowError::Discovery(format!(
+            "Dylint declaration in '{}' is incomplete: library {} must have exactly one \
+             non-empty 'git' or 'path' source",
+            path.display(),
+            index + 1
+        )));
+    }
+    let revisions = ["branch", "tag", "rev"]
+        .into_iter()
+        .filter(|key| table.contains_key(*key))
+        .collect::<Vec<_>>();
+    if revisions.len() > 1
+        || revisions.iter().any(|key| {
+            table
+                .get(*key)
+                .and_then(toml::Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+        })
+        || (sources == ["path"] && !revisions.is_empty())
+    {
+        return Err(WorkflowError::Discovery(format!(
+            "Dylint declaration in '{}' is malformed: library {} may use one non-empty \
+             'branch', 'tag', or 'rev' option with a 'git' source",
+            path.display(),
+            index + 1
+        )));
+    }
+    if let Some(pattern) = table.get("pattern") {
+        let valid = pattern
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+            || pattern.as_array().is_some_and(|values| {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+            });
+        if !valid {
+            return Err(WorkflowError::Discovery(format!(
+                "Dylint declaration in '{}' is malformed: library {} pattern must be a \
+                 non-empty string or string array",
+                path.display(),
+                index + 1
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn configurations_for_manifest(

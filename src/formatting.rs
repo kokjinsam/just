@@ -452,21 +452,19 @@ pub fn execute_plan(
 }
 
 #[cfg(unix)]
-struct InterruptGuard {
+pub(crate) struct InterruptGuard {
     received: Arc<AtomicBool>,
     registration: signal_hook::SigId,
 }
 
 #[cfg(unix)]
 impl InterruptGuard {
-    fn install() -> Result<Self, WorkflowError> {
+    pub(crate) fn install() -> Result<Self, WorkflowError> {
         let received = Arc::new(AtomicBool::new(false));
         let registration =
             signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&received))
                 .map_err(|error| {
-                    WorkflowError::Planning(format!(
-                        "cannot install formatter interruption handler: {error}"
-                    ))
+                    WorkflowError::Planning(format!("cannot install interruption handler: {error}"))
                 })?;
         Ok(Self {
             received,
@@ -474,7 +472,7 @@ impl InterruptGuard {
         })
     }
 
-    fn received(&self) -> bool {
+    pub(crate) fn received(&self) -> bool {
         self.received.load(Ordering::Relaxed)
     }
 }
@@ -487,15 +485,15 @@ impl Drop for InterruptGuard {
 }
 
 #[cfg(not(unix))]
-struct InterruptGuard;
+pub(crate) struct InterruptGuard;
 
 #[cfg(not(unix))]
 impl InterruptGuard {
-    fn install() -> Result<Self, WorkflowError> {
+    pub(crate) fn install() -> Result<Self, WorkflowError> {
         Ok(Self)
     }
 
-    const fn received(&self) -> bool {
+    pub(crate) const fn received(&self) -> bool {
         false
     }
 }
@@ -557,7 +555,7 @@ fn preflight(plan: &Plan) -> Result<Vec<TlaReservation>, WorkflowError> {
     Ok(reservations)
 }
 
-fn find_program(program: &OsStr) -> Option<PathBuf> {
+pub(crate) fn find_program(program: &OsStr) -> Option<PathBuf> {
     let path = Path::new(program);
     if path.components().count() > 1 {
         return executable(path).then(|| path.to_path_buf());
@@ -697,14 +695,14 @@ fn create_reservation(candidate: &Path, _source: &Path) -> io::Result<fs::File> 
 }
 
 #[cfg(unix)]
-fn was_interrupted(output: &Output) -> bool {
+pub(crate) fn was_interrupted(output: &Output) -> bool {
     use std::os::unix::process::ExitStatusExt;
 
     output.status.signal() == Some(2)
 }
 
 #[cfg(not(unix))]
-fn was_interrupted(_output: &Output) -> bool {
+pub(crate) fn was_interrupted(_output: &Output) -> bool {
     false
 }
 
@@ -809,6 +807,7 @@ const fn capability_name(capability: Capability) -> &'static str {
         Capability::TargetTest => "target_test",
         Capability::SpecCheck => "spec_check",
         Capability::ApplicationTest => "application_test",
+        Capability::DoctorCheck => "doctor_check",
     }
 }
 

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use kokjinsam_just::config::WorkspaceConfig;
 
@@ -145,6 +146,102 @@ fn duplicate_explicit_component_roots_are_rejected() {
     );
 
     assert!(error.contains("have the same root"), "{error}");
+}
+
+#[test]
+fn exact_system_and_target_owner_root_collisions_are_rejected() {
+    let cases = [
+        (
+            concat!(
+                "version: 1\n",
+                "system:\n  specs: shared\n  tests: shared\n",
+                "targets:\n  api:\n    path: apps/api\n",
+            ),
+            vec!["apps/api", "shared"],
+            ["system.specs", "system.tests"],
+        ),
+        (
+            concat!(
+                "version: 1\n",
+                "system:\n  specs: specs\n  tests: apps/api\n",
+                "targets:\n  api:\n    path: apps/api\n",
+            ),
+            vec!["apps/api", "specs"],
+            ["system.tests", "target '@api'"],
+        ),
+        (
+            concat!(
+                "version: 1\n",
+                "system:\n  specs: apps/api/web\n  tests: test\n",
+                "targets:\n",
+                "  api:\n",
+                "    path: apps/api\n",
+                "    components:\n",
+                "      backend:\n        path: backend\n",
+                "      web:\n        path: web\n",
+            ),
+            vec!["apps/api/backend", "apps/api/web", "test"],
+            ["system.specs", "component '@api:web'"],
+        ),
+    ];
+
+    for (yaml, directories, owners) in cases {
+        let repository = synthetic_repository(yaml, &directories);
+        let root = repository.path().canonicalize().unwrap();
+        let error = WorkspaceConfig::load(repository.path())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(owners[0]), "{error}");
+        assert!(error.contains(owners[1]), "{error}");
+        assert!(error.contains(root.to_string_lossy().as_ref()), "{error}");
+    }
+}
+
+#[test]
+fn ancestor_relationships_and_legitimate_nested_components_are_allowed() {
+    let repository = synthetic_repository(
+        concat!(
+            "version: 1\n",
+            "system:\n  specs: apps\n  tests: test\n",
+            "targets:\n",
+            "  api:\n",
+            "    path: apps/api\n",
+            "    components:\n",
+            "      backend:\n        path: .\n",
+            "      web:\n        path: web\n",
+        ),
+        &["apps/api/web", "test"],
+    );
+
+    let config = WorkspaceConfig::load(repository.path()).unwrap();
+
+    assert_eq!(config.targets["api"].components.len(), 2);
+}
+
+#[test]
+fn owner_root_collisions_fail_before_doctor_with_exit_two() {
+    let repository = synthetic_repository(
+        concat!(
+            "version: 1\n",
+            "system:\n  specs: shared\n  tests: shared\n",
+            "targets:\n  api:\n    path: apps/api\n",
+        ),
+        &["apps/api", "shared"],
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_workflow"))
+        .arg("doctor")
+        .current_dir(repository.path())
+        .env_remove("JUST_CALLER_DIR")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostic.contains("system.specs"), "{diagnostic}");
+    assert!(diagnostic.contains("system.tests"), "{diagnostic}");
+    assert!(!diagnostic.contains("doctor-check"), "{diagnostic}");
 }
 
 #[test]

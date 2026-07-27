@@ -6,9 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::capability::Capability;
+use crate::doctor;
 use crate::error::{EXIT_INTERRUPTED, EXIT_SUCCESS, EXIT_VERIFICATION_FAILED};
 use crate::error::{EXIT_USAGE, WorkflowError};
 use crate::formatting::{build_plan, execute_plan};
+use crate::linting;
 use crate::report::{Report, ReportStatus, render_human, render_json};
 use crate::selector::resolve_selectors;
 use crate::workspace::{Workspace, invocation_directory};
@@ -110,6 +112,12 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
     if matches!(cli.command, FoundationCommand::Format(_)) {
         return run_format(cli, &workspace, &selections);
     }
+    if matches!(cli.command, FoundationCommand::Lint(_)) {
+        return run_lint(cli, &workspace, &selections);
+    }
+    if matches!(cli.command, FoundationCommand::Doctor) {
+        return run_doctor(cli, &workspace);
+    }
 
     let report = Report::unavailable(
         cli.command.name(),
@@ -161,6 +169,61 @@ fn run_format(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::S
         },
     }
 
+    match report.status {
+        ReportStatus::Passed => EXIT_SUCCESS,
+        ReportStatus::Failed => EXIT_VERIFICATION_FAILED,
+        ReportStatus::Interrupted => EXIT_INTERRUPTED,
+        ReportStatus::Error | ReportStatus::Unavailable => EXIT_USAGE,
+    }
+}
+
+fn run_lint(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Selection]) -> u8 {
+    let plan = match linting::build_plan(workspace, selections) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) = match linting::execute_plan(
+        workspace,
+        &plan,
+        cli.command.selectors().to_vec(),
+        unix_timestamp(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
+}
+
+fn run_doctor(cli: &Cli, workspace: &Workspace) -> u8 {
+    let report = match doctor::inspect(workspace, unix_timestamp()) {
+        Ok(report) => report,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    render_completed(cli.output, &report, "", "")
+}
+
+fn render_completed(
+    output: OutputFormat,
+    report: &Report,
+    child_stdout: &str,
+    child_stderr: &str,
+) -> u8 {
+    if !child_stdout.is_empty() {
+        eprint!("{child_stdout}");
+    }
+    if !child_stderr.is_empty() {
+        eprint!("{child_stderr}");
+    }
+    match output {
+        OutputFormat::Human => eprint!("{}", render_human(report)),
+        OutputFormat::Json => match render_json(report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("error: could not serialize report: {error}");
+                return EXIT_USAGE;
+            }
+        },
+    }
     match report.status {
         ReportStatus::Passed => EXIT_SUCCESS,
         ReportStatus::Failed => EXIT_VERIFICATION_FAILED,
