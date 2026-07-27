@@ -1,0 +1,2 @@
+defmodule Fixture do
+end

@@ -1,6 +1,10 @@
+pub mod capability;
 pub mod cli;
 pub mod config;
+pub mod discovery;
 pub mod error;
+pub mod ownership;
+pub mod plan;
 pub mod report;
 pub mod selector;
 pub mod workspace;

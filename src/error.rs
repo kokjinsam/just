@@ -13,6 +13,12 @@ pub enum WorkflowError {
     Workspace(String),
     #[error("selector error: {0}")]
     Selector(String),
+    #[error("ownership error: {0}")]
+    Ownership(String),
+    #[error("discovery error: {0}")]
+    Discovery(String),
+    #[error("planning error: {0}")]
+    Planning(String),
     #[error("usage error: {0}")]
     Usage(String),
     #[error("command '{command}' is not implemented in milestone 1")]
@@ -32,6 +38,9 @@ impl WorkflowError {
             Self::Configuration(_)
             | Self::Workspace(_)
             | Self::Selector(_)
+            | Self::Ownership(_)
+            | Self::Discovery(_)
+            | Self::Planning(_)
             | Self::Usage(_)
             | Self::Unavailable { .. } => EXIT_USAGE,
         }

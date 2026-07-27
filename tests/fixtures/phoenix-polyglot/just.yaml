@@ -1,0 +1,16 @@
+version: 1
+
+system:
+  specs: specs
+  tests: tests/application
+
+targets:
+  api:
+    path: apps/api
+    components:
+      backend:
+        path: .
+      web:
+        path: assets
+      native:
+        path: native/parser

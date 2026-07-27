@@ -1,0 +1,14 @@
+{
+  "name": "fixture-web",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "oxfmt": "0.1.0",
+    "oxlint": "1.0.0",
+    "stylelint": "16.0.0"
+  }
+}
