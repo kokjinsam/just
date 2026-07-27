@@ -120,6 +120,75 @@ fn optional_dylint_is_skipped_and_doctor_launches_no_tools() {
             .iter()
             .all(|step| step["capability"] == "doctor-check")
     );
+    for provider in ["dialyzer", "mix-compile", "cargo-check"] {
+        assert_eq!(
+            report["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|step| step["provider"] == provider)
+                .unwrap()["status"],
+            "passed",
+            "{provider}"
+        );
+    }
+    for provider in ["package-typecheck", "package-build"] {
+        let finding = report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == provider)
+            .unwrap();
+        assert_eq!(finding["status"], "skipped", "{provider}");
+        assert!(
+            finding["skip_reason"]
+                .as_str()
+                .unwrap()
+                .contains("not applicable")
+        );
+    }
+}
+
+#[test]
+fn declared_node_checking_scripts_require_pnpm_without_launching_it() {
+    let repository = repository();
+    fs::write(
+        repository.path().join("app/assets/package.json"),
+        r#"{"scripts":{"typecheck":"tsc","build":"vite build"}}"#,
+    )
+    .unwrap();
+    let tools = tools(repository.path());
+    let ready = run(repository.path(), tools.path(), "json");
+    assert_eq!(ready.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&ready.stdout).unwrap();
+    for provider in ["package-typecheck", "package-build"] {
+        assert_eq!(
+            report["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|step| step["provider"] == provider)
+                .unwrap()["status"],
+            "passed"
+        );
+    }
+    assert!(!repository.path().join("launched").exists());
+
+    fs::remove_file(tools.path().join("pnpm")).unwrap();
+    let missing = run(repository.path(), tools.path(), "json");
+    assert_eq!(missing.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    for provider in ["package-typecheck", "package-build"] {
+        let finding = report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == provider)
+            .unwrap();
+        assert_eq!(finding["status"], "failed");
+        assert!(finding["stderr"].as_str().unwrap().contains("pnpm"));
+    }
+    assert!(!repository.path().join("launched").exists());
 }
 
 #[test]

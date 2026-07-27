@@ -41,7 +41,17 @@ fn every_foundation_command_is_recognized_and_fails_closed() {
         assert!(String::from_utf8(output.stderr).unwrap().contains("passed"));
     }
 
-    for command in ["typecheck", "compile", "spec", "test", "coverage", "verify"] {
+    for command in ["typecheck", "compile"] {
+        let output = run(&[command], &root);
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("1 steps · passed")
+        );
+    }
+
+    for command in ["spec", "test", "coverage", "verify"] {
         let output = run(&[command], &root);
 
         assert_eq!(output.status.code(), Some(2), "{command}");
@@ -189,11 +199,16 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
             .unwrap();
         assert_eq!(
             output.status.code(),
-            Some(if matches!(command, "format" | "lint" | "doctor") {
-                0
-            } else {
-                2
-            }),
+            Some(
+                if matches!(
+                    command,
+                    "format" | "lint" | "typecheck" | "compile" | "doctor"
+                ) {
+                    0
+                } else {
+                    2
+                }
+            ),
             "{command}"
         );
     }

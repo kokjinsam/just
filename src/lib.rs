@@ -1,4 +1,5 @@
 pub mod capability;
+pub mod checking;
 pub mod cli;
 pub mod config;
 pub mod discovery;

@@ -55,6 +55,8 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
             ResourceKind::MixManifest => {
                 findings.push(manifest_report(workspace, resource, "mix-manifest"));
                 checks.push(check(resource, "mix-format", "mix", Vec::new()));
+                checks.push(check(resource, "dialyzer", "mix", Vec::new()));
+                checks.push(check(resource, "mix-compile", "mix", Vec::new()));
                 for (file, provider) in [
                     (".credo.exs", "credo"),
                     (".sobelow-conf", "sobelow"),
@@ -95,6 +97,20 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                         checks.push(check(resource, "stylelint", "pnpm", configs));
                     }
                 }
+                for (script, provider) in [
+                    ("typecheck", "package-typecheck"),
+                    ("build", "package-build"),
+                ] {
+                    if package
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get(script))
+                        .is_some()
+                    {
+                        checks.push(check(resource, provider, "pnpm", Vec::new()));
+                    } else {
+                        findings.push(skipped_script_report(workspace, resource, provider, script));
+                    }
+                }
             }
             ResourceKind::CargoManifest => {
                 findings.push(manifest_report(workspace, resource, "cargo-manifest"));
@@ -110,6 +126,7 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                     &["cargo", "cargo-clippy"],
                     Vec::new(),
                 ));
+                checks.push(check(resource, "cargo-check", "cargo", Vec::new()));
             }
             ResourceKind::Specification
                 if resource
@@ -347,6 +364,27 @@ fn skipped_dylint_report(
         Vec::new(),
         StepStatus::Skipped,
         Some("not applicable: workspace.metadata.dylint.libraries is not declared".into()),
+        String::new(),
+    )
+}
+
+fn skipped_script_report(
+    workspace: &Workspace,
+    manifest: &crate::discovery::DiscoveredResource,
+    provider: &str,
+    script: &str,
+) -> StepReport {
+    step_report(
+        workspace,
+        provider,
+        &manifest.owner,
+        manifest.path.parent().unwrap_or(Path::new("")),
+        vec![manifest.path.clone()],
+        Vec::new(),
+        StepStatus::Skipped,
+        Some(format!(
+            "not applicable: package.json scripts.{script} is not declared"
+        )),
         String::new(),
     )
 }

@@ -86,6 +86,28 @@ pub(crate) fn resources_for_selections(
     Ok(resources)
 }
 
+pub(crate) fn manifests_for_selections(
+    workspace: &Workspace,
+    selections: &[Selection],
+) -> Result<Vec<DiscoveredResource>, WorkflowError> {
+    let resources = resources_for_selections(workspace, selections)?;
+    let ownership = Ownership::new(&workspace.config);
+    Ok(resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.kind,
+                ResourceKind::MixManifest
+                    | ResourceKind::NodeManifest
+                    | ResourceKind::CargoManifest
+            ) && selections.iter().any(|selection| {
+                selection_includes_manifest(selection, resource, &resources, &ownership)
+            })
+        })
+        .cloned()
+        .collect())
+}
+
 fn add_explicit_ancestor_manifests(
     workspace: &Workspace,
     selections: &[Selection],
@@ -342,6 +364,14 @@ fn mix_bindings(
             "mix-format",
             &configs,
             ".formatter.exs",
+        ),
+        binding(
+            resource,
+            &root,
+            Capability::Typecheck,
+            "dialyzer",
+            &configs,
+            "",
         ),
         binding(
             resource,

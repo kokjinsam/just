@@ -252,6 +252,7 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
                 Capability::FormatCheck,
                 PathBuf::from("apps/api"),
             ),
+            ("dialyzer", Capability::Typecheck, PathBuf::from("apps/api"),),
             (
                 "mix-compile",
                 Capability::Compile,

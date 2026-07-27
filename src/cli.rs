@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::capability::Capability;
+use crate::checking;
 use crate::doctor;
 use crate::error::{EXIT_INTERRUPTED, EXIT_SUCCESS, EXIT_VERIFICATION_FAILED};
 use crate::error::{EXIT_USAGE, WorkflowError};
@@ -115,6 +116,12 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
     if matches!(cli.command, FoundationCommand::Lint(_)) {
         return run_lint(cli, &workspace, &selections);
     }
+    if matches!(
+        cli.command,
+        FoundationCommand::Typecheck(_) | FoundationCommand::Compile(_)
+    ) {
+        return run_checking(cli, &workspace, &selections);
+    }
     if matches!(cli.command, FoundationCommand::Doctor) {
         return run_doctor(cli, &workspace);
     }
@@ -187,6 +194,29 @@ fn run_lint(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Sel
         &plan,
         cli.command.selectors().to_vec(),
         unix_timestamp(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
+}
+
+fn run_checking(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Selection]) -> u8 {
+    let capability = match cli.command {
+        FoundationCommand::Typecheck(_) => Capability::Typecheck,
+        FoundationCommand::Compile(_) => Capability::Compile,
+        _ => unreachable!("checking requires typecheck or compile"),
+    };
+    let plan = match checking::build_plan(workspace, selections, capability) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) = match checking::execute_plan(
+        workspace,
+        &plan,
+        cli.command.selectors().to_vec(),
+        unix_timestamp(),
+        capability,
     ) {
         Ok(result) => result,
         Err(error) => return render_error(cli.output, &error),
