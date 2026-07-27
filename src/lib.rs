@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod formatting;
 pub mod ownership;
 pub mod plan;
 pub mod report;

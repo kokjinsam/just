@@ -28,6 +28,8 @@ fn json_reports_are_deterministic_and_include_every_frozen_field() {
             exit_code: Some(1),
             duration: 12,
             skip_reason: None,
+            stdout: "formatted\n".into(),
+            stderr: "warning\n".into(),
         }],
     };
 
@@ -40,7 +42,8 @@ fn json_reports_are_deterministic_and_include_every_frozen_field() {
             r#""provider":"oxlint","target":"api","component":"web","#,
             r#""cwd":"apps/api/assets","argv":["oxlint","."],"#,
             r#""configuration_files":["oxlint.json"],"targets":["src"],"#,
-            r#""status":"failed","exit_code":1,"duration":12,"skip_reason":null}]}"#
+            r#""status":"failed","exit_code":1,"duration":12,"skip_reason":null,"#,
+            r#""stdout":"formatted\n","stderr":"warning\n"}]}"#
         )
     );
 }
@@ -84,6 +87,8 @@ fn human_summary_includes_target_component_scope_and_complete_step_details() {
             exit_code: Some(1),
             duration: 12,
             skip_reason: None,
+            stdout: String::new(),
+            stderr: String::new(),
         }],
     };
 
@@ -120,6 +125,8 @@ fn human_summary_uses_repository_scope_when_target_and_component_are_absent() {
             exit_code: Some(0),
             duration: 7,
             skip_reason: None,
+            stdout: String::new(),
+            stderr: String::new(),
         }],
     };
 

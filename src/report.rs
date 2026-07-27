@@ -38,6 +38,8 @@ pub struct StepReport {
     pub exit_code: Option<i32>,
     pub duration: u64,
     pub skip_reason: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

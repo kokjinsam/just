@@ -13,6 +13,7 @@ use crate::workspace::Workspace;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
     Format,
+    FormatCheck,
     Lint,
     Typecheck,
     Compile,
@@ -42,7 +43,7 @@ pub struct CapabilityBinding {
     pub provider: ProviderId,
     pub owner: Owner,
     pub root: PathBuf,
-    pub manifest: PathBuf,
+    pub evidence: PathBuf,
     pub configuration_files: Vec<PathBuf>,
 }
 
@@ -261,12 +262,22 @@ fn configuration_manifest_kind(path: &Path) -> Option<ResourceKind> {
 }
 
 fn source_manifest_kind(path: &Path) -> Option<ResourceKind> {
+    if is_oxfmt_source(path) {
+        return Some(ResourceKind::NodeManifest);
+    }
     match path.extension().and_then(|extension| extension.to_str()) {
-        Some("ex" | "exs") => Some(ResourceKind::MixManifest),
-        Some("js" | "jsx" | "ts" | "tsx" | "css" | "scss") => Some(ResourceKind::NodeManifest),
+        Some("ex" | "exs" | "heex") => Some(ResourceKind::MixManifest),
         Some("rs") => Some(ResourceKind::CargoManifest),
         _ => None,
     }
+}
+
+#[must_use]
+pub(crate) fn is_oxfmt_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" | "css" | "scss")
+    )
 }
 
 fn bindings_for_resource(
@@ -277,6 +288,10 @@ fn bindings_for_resource(
         ResourceKind::MixManifest => Ok(mix_bindings(resource, resources)),
         ResourceKind::NodeManifest => node_bindings(resource, resources),
         ResourceKind::CargoManifest => Ok(rust_bindings(resource, resources)),
+        ResourceKind::Specification if is_tla_file(&resource.path) => Ok(vec![
+            direct_binding(resource, Capability::Format, "tla-format"),
+            direct_binding(resource, Capability::FormatCheck, "tla-format"),
+        ]),
         ResourceKind::Configuration
         | ResourceKind::Specification
         | ResourceKind::ApplicationTest
@@ -299,6 +314,14 @@ fn mix_bindings(
             resource,
             &root,
             Capability::Format,
+            "mix-format",
+            &configs,
+            ".formatter.exs",
+        ),
+        binding(
+            resource,
+            &root,
+            Capability::FormatCheck,
             "mix-format",
             &configs,
             ".formatter.exs",
@@ -387,6 +410,14 @@ fn node_bindings(
             &configs,
             "",
         ));
+        bindings.push(binding(
+            resource,
+            &root,
+            Capability::FormatCheck,
+            "oxfmt",
+            &configs,
+            "",
+        ));
     }
     if has_dependency("oxlint") {
         bindings.push(binding(
@@ -438,6 +469,14 @@ fn rust_bindings(
     let configs = configurations_for_manifest(resource, resources);
     vec![
         binding(resource, &root, Capability::Format, "rustfmt", &configs, ""),
+        binding(
+            resource,
+            &root,
+            Capability::FormatCheck,
+            "rustfmt",
+            &configs,
+            "",
+        ),
         binding(resource, &root, Capability::Lint, "clippy", &configs, ""),
         binding(
             resource,
@@ -532,7 +571,30 @@ fn binding(
         provider: ProviderId::new(provider),
         owner: resource.owner.clone(),
         root: root.to_path_buf(),
-        manifest: resource.path.clone(),
+        evidence: resource.path.clone(),
         configuration_files,
     }
+}
+
+fn direct_binding(
+    resource: &DiscoveredResource,
+    capability: Capability,
+    provider: &str,
+) -> CapabilityBinding {
+    CapabilityBinding {
+        capability,
+        provider: ProviderId::new(provider),
+        owner: resource.owner.clone(),
+        root: resource
+            .path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf(),
+        evidence: resource.path.clone(),
+        configuration_files: Vec::new(),
+    }
+}
+
+fn is_tla_file(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "tla")
 }

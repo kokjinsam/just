@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 
+use crate::capability::is_oxfmt_source;
 use crate::error::WorkflowError;
 use crate::ownership::{Owner, Ownership, SystemResource};
 use crate::selector::Selection;
@@ -207,10 +208,7 @@ fn classify(workspace: &Workspace, path: &Path) -> Option<ResourceKind> {
     if path.starts_with(&workspace.config.system.specs) {
         return Some(ResourceKind::Specification);
     }
-    if path.starts_with(&workspace.config.system.tests) {
-        return Some(ResourceKind::ApplicationTest);
-    }
-    match path.file_name().and_then(|name| name.to_str()) {
+    let normal_kind = match path.file_name().and_then(|name| name.to_str()) {
         Some("mix.exs") => Some(ResourceKind::MixManifest),
         Some("package.json") => Some(ResourceKind::NodeManifest),
         Some("Cargo.toml") => Some(ResourceKind::CargoManifest),
@@ -233,8 +231,19 @@ fn classify(workspace: &Workspace, path: &Path) -> Option<ResourceKind> {
         {
             Some(ResourceKind::Configuration)
         }
+        _ if path.extension().is_some_and(|extension| extension == "tla") => {
+            Some(ResourceKind::Specification)
+        }
         _ => None,
+    };
+    if path.starts_with(&workspace.config.system.tests) {
+        return normal_kind.or_else(|| {
+            is_oxfmt_source(path)
+                .then_some(ResourceKind::SelectedFile)
+                .or(Some(ResourceKind::ApplicationTest))
+        });
     }
+    normal_kind
 }
 
 #[must_use]

@@ -26,8 +26,16 @@ fn run(args: &[&str], current_dir: &Path) -> Output {
 fn every_foundation_command_is_recognized_and_fails_closed() {
     let root = fixture("valid-minimal");
 
+    let format = run(&["format"], &root);
+    assert_eq!(format.status.code(), Some(0));
+    assert!(format.stdout.is_empty());
+    assert!(
+        String::from_utf8(format.stderr)
+            .unwrap()
+            .contains("0 steps · passed")
+    );
+
     for command in [
-        "format",
         "lint",
         "typecheck",
         "compile",
@@ -182,7 +190,11 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
             .env("PATH", fake_bin.path())
             .output()
             .unwrap();
-        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert_eq!(
+            output.status.code(),
+            Some(if command == "format" { 0 } else { 2 }),
+            "{command}"
+        );
     }
 
     assert!(!marker.exists());

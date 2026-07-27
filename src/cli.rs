@@ -5,8 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::capability::Capability;
+use crate::error::{EXIT_INTERRUPTED, EXIT_SUCCESS, EXIT_VERIFICATION_FAILED};
 use crate::error::{EXIT_USAGE, WorkflowError};
-use crate::report::{Report, render_human, render_json};
+use crate::formatting::{build_plan, execute_plan};
+use crate::report::{Report, ReportStatus, render_human, render_json};
 use crate::selector::resolve_selectors;
 use crate::workspace::{Workspace, invocation_directory};
 
@@ -99,8 +102,13 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         Ok(workspace) => workspace,
         Err(error) => return render_error(cli.output, &error),
     };
-    if let Err(error) = resolve_selectors(&workspace, cli.command.selectors()) {
-        return render_error(cli.output, &error);
+    let selections = match resolve_selectors(&workspace, cli.command.selectors()) {
+        Ok(selections) => selections,
+        Err(error) => return render_error(cli.output, &error),
+    };
+
+    if matches!(cli.command, FoundationCommand::Format(_)) {
+        return run_format(cli, &workspace, &selections);
     }
 
     let report = Report::unavailable(
@@ -119,6 +127,46 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         },
     }
     EXIT_USAGE
+}
+
+fn run_format(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Selection]) -> u8 {
+    let plan = match build_plan(workspace, selections, Capability::Format) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) = match execute_plan(
+        workspace,
+        &plan,
+        cli.command.selectors().to_vec(),
+        unix_timestamp(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return render_error(cli.output, &error),
+    };
+
+    if !child_stdout.is_empty() {
+        eprint!("{child_stdout}");
+    }
+    if !child_stderr.is_empty() {
+        eprint!("{child_stderr}");
+    }
+    match cli.output {
+        OutputFormat::Human => eprint!("{}", render_human(&report)),
+        OutputFormat::Json => match render_json(&report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("error: could not serialize report: {error}");
+                return EXIT_USAGE;
+            }
+        },
+    }
+
+    match report.status {
+        ReportStatus::Passed => EXIT_SUCCESS,
+        ReportStatus::Failed => EXIT_VERIFICATION_FAILED,
+        ReportStatus::Interrupted => EXIT_INTERRUPTED,
+        ReportStatus::Error | ReportStatus::Unavailable => EXIT_USAGE,
+    }
 }
 
 fn render_error(output: OutputFormat, error: &WorkflowError) -> u8 {

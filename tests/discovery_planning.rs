@@ -220,6 +220,11 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
                 Capability::Format,
                 PathBuf::from("apps/api/assets")
             ),
+            (
+                "oxfmt",
+                Capability::FormatCheck,
+                PathBuf::from("apps/api/assets")
+            ),
             ("oxlint", Capability::Lint, PathBuf::from("apps/api/assets")),
             (
                 "stylelint",
@@ -243,6 +248,11 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
             ),
             ("mix-format", Capability::Format, PathBuf::from("apps/api")),
             (
+                "mix-format",
+                Capability::FormatCheck,
+                PathBuf::from("apps/api"),
+            ),
+            (
                 "mix-compile",
                 Capability::Compile,
                 PathBuf::from("apps/api")
@@ -252,6 +262,11 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
             (
                 "rustfmt",
                 Capability::Format,
+                PathBuf::from("apps/api/native/parser"),
+            ),
+            (
+                "rustfmt",
+                Capability::FormatCheck,
                 PathBuf::from("apps/api/native/parser"),
             ),
             (
@@ -336,7 +351,7 @@ fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
         .iter()
         .find(|binding| {
             binding.provider.as_str() == "nextest"
-                && binding.manifest == workspace.root.join("apps/api/native/parser/Cargo.toml")
+                && binding.evidence == workspace.root.join("apps/api/native/parser/Cargo.toml")
         })
         .unwrap();
     assert_eq!(nextest.configuration_files, Vec::<PathBuf>::new());
@@ -349,7 +364,9 @@ fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
     assert_eq!(
         ignored_bindings
             .iter()
-            .filter(|binding| binding.provider.as_str() == "oxfmt")
+            .filter(|binding| {
+                binding.provider.as_str() == "oxfmt" && binding.capability == Capability::Format
+            })
             .map(|binding| relative(&workspace.root, &binding.root))
             .collect::<Vec<_>>(),
         vec![PathBuf::from("ignored/tool")]
@@ -418,6 +435,51 @@ fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
             .collect::<Vec<_>>(),
         vec![PathBuf::from("apps/api/tools/child")]
     );
+}
+
+#[test]
+fn application_test_packages_keep_system_ownership_and_discover_oxfmt() {
+    let repository = repository();
+    let package = repository.path().join("tests/application/browser");
+    fs::create_dir_all(package.join("src/empty")).unwrap();
+    fs::write(
+        package.join("package.json"),
+        r#"{"devDependencies":{"oxfmt":"1.0.0"}}"#,
+    )
+    .unwrap();
+    fs::write(package.join("src/spec.mts"), "const value=1").unwrap();
+    fs::write(package.join("src/unrelated.py"), "pass\n").unwrap();
+    let workspace = Workspace::discover(repository.path()).unwrap();
+    let package = package.canonicalize().unwrap();
+
+    for selection in [
+        Selection::Repository,
+        Selection::Path(package.clone()),
+        Selection::Path(package.join("src/spec.mts").canonicalize().unwrap()),
+    ] {
+        let bindings = bindings_for_selections(&workspace, &[selection]).unwrap();
+        let binding = bindings
+            .iter()
+            .find(|binding| {
+                binding.provider.as_str() == "oxfmt"
+                    && binding.capability == Capability::Format
+                    && binding.root == package
+            })
+            .unwrap();
+        assert_eq!(
+            binding.owner,
+            Owner::Repository(SystemResource::ApplicationTests)
+        );
+    }
+
+    let unsupported = bindings_for_selections(
+        &workspace,
+        &[Selection::Path(
+            package.join("src/unrelated.py").canonicalize().unwrap(),
+        )],
+    )
+    .unwrap();
+    assert!(unsupported.is_empty());
 }
 
 fn step(id: &str, dependencies: &[&str]) -> Step {
