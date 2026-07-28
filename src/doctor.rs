@@ -143,6 +143,91 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                     tools: vec![OsString::from("java")],
                     tla_jar: true,
                 });
+                if resource
+                    .path
+                    .starts_with(workspace.config.system.specs.join("tla"))
+                {
+                    checks.push(Check {
+                        provider: "apalache".into(),
+                        owner: resource.owner.clone(),
+                        root: workspace.config.system.specs.join("tla"),
+                        evidence: resource.path.clone(),
+                        configuration_files: {
+                            let mut files = Vec::new();
+                            let cfg = resource.path.with_extension("cfg");
+                            if cfg.is_file() {
+                                files.push(cfg);
+                            }
+                            files.extend(specification_configurations(
+                                &resource.path,
+                                &workspace.config.system.specs.join("tla"),
+                                &[".apalache.cfg"],
+                            ));
+                            files
+                        },
+                        tools: vec![OsString::from("apalache-mc")],
+                        tla_jar: false,
+                    });
+                }
+            }
+            ResourceKind::Specification
+                if resource
+                    .path
+                    .starts_with(workspace.config.system.specs.join("alloy"))
+                    && resource
+                        .path
+                        .extension()
+                        .is_some_and(|extension| extension == "als") =>
+            {
+                checks.push(Check {
+                    provider: "alloy".into(),
+                    owner: resource.owner.clone(),
+                    root: workspace.config.system.specs.join("alloy"),
+                    evidence: resource.path.clone(),
+                    configuration_files: Vec::new(),
+                    tools: vec![OsString::from("alloy")],
+                    tla_jar: false,
+                });
+            }
+            ResourceKind::Specification
+                if resource
+                    .path
+                    .starts_with(workspace.config.system.specs.join("openapi"))
+                    && resource
+                        .path
+                        .file_name()
+                        .is_none_or(|name| name != "vacuum.conf.yaml")
+                    && matches!(
+                        resource
+                            .path
+                            .extension()
+                            .and_then(|extension| extension.to_str()),
+                        Some("yaml" | "yml" | "json")
+                    ) =>
+            {
+                let configurations = specification_configurations(
+                    &resource.path,
+                    &workspace.config.system.specs.join("openapi"),
+                    &["vacuum.conf.yaml"],
+                );
+                checks.push(Check {
+                    provider: "oasdiff".into(),
+                    owner: resource.owner.clone(),
+                    root: workspace.config.system.specs.join("openapi"),
+                    evidence: resource.path.clone(),
+                    configuration_files: Vec::new(),
+                    tools: vec![OsString::from("oasdiff")],
+                    tla_jar: false,
+                });
+                checks.push(Check {
+                    provider: "vacuum".into(),
+                    owner: resource.owner.clone(),
+                    root: workspace.config.system.specs.join("openapi"),
+                    evidence: resource.path.clone(),
+                    configuration_files: configurations,
+                    tools: vec![OsString::from("vacuum")],
+                    tla_jar: false,
+                });
             }
             ResourceKind::Configuration
             | ResourceKind::Specification
@@ -156,7 +241,14 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
             .cmp(&right.root)
             .then_with(|| left.provider.cmp(&right.provider))
     });
-    checks.dedup_by(|left, right| left.root == right.root && left.provider == right.provider);
+    checks.dedup_by(|left, right| {
+        left.root == right.root
+            && left.provider == right.provider
+            && (!matches!(
+                left.provider.as_str(),
+                "apalache" | "alloy" | "oasdiff" | "vacuum"
+            ) || left.evidence == right.evidence)
+    });
     let mut reports = findings;
     reports.extend(
         checks
@@ -221,6 +313,25 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
         status,
         steps: reports,
     })
+}
+
+fn specification_configurations(path: &Path, root: &Path, names: &[&str]) -> Vec<PathBuf> {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        let found = names
+            .iter()
+            .map(|name| directory.join(name))
+            .filter(|candidate| candidate.is_file())
+            .collect::<Vec<_>>();
+        if !found.is_empty() {
+            return found;
+        }
+        if directory == root {
+            break;
+        }
+        current = directory.parent();
+    }
+    Vec::new()
 }
 
 fn manifest_report(

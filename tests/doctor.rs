@@ -290,3 +290,88 @@ fn tla_tools_are_required_only_when_tla_formatting_applies() {
     assert!(diagnostic.contains("java"));
     assert!(diagnostic.contains("TLA2TOOLS_JAR"));
 }
+
+#[test]
+fn specification_tools_and_local_configuration_are_reported_only_when_applicable() {
+    let repository = repository();
+    fs::create_dir_all(repository.path().join("specifications/tla")).unwrap();
+    fs::create_dir_all(repository.path().join("specifications/alloy")).unwrap();
+    fs::create_dir_all(repository.path().join("specifications/openapi")).unwrap();
+    fs::write(
+        repository.path().join("specifications/tla/Model.tla"),
+        "---- MODULE Model ----\n====\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.path().join("specifications/tla/Model.cfg"),
+        "INIT Init\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.path().join("specifications/tla/.apalache.cfg"),
+        "checker.tuning.search.smt.encoding = \"oops\"\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.path().join("specifications/alloy/model.als"),
+        "run {} expect 1\n",
+    )
+    .unwrap();
+    fs::write(
+        repository
+            .path()
+            .join("specifications/openapi/vacuum.conf.yaml"),
+        "rules: {}\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.path().join("specifications/openapi/api.yaml"),
+        "openapi: 3.1.0\n",
+    )
+    .unwrap();
+    let tools = tools(repository.path());
+    let output = run(repository.path(), tools.path(), "json");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!repository.path().join("launched").exists());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    for provider in ["apalache", "alloy", "oasdiff", "vacuum"] {
+        let step = report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == provider)
+            .unwrap();
+        assert_eq!(step["status"], "failed", "{provider}");
+        assert!(
+            step["stderr"].as_str().unwrap().contains(match provider {
+                "apalache" => "apalache-mc",
+                other => other,
+            }),
+            "{provider}"
+        );
+    }
+    let apalache = report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["provider"] == "apalache")
+        .unwrap();
+    assert_eq!(
+        apalache["configuration_files"],
+        serde_json::json!([
+            "specifications/tla/Model.cfg",
+            "specifications/tla/.apalache.cfg"
+        ])
+    );
+    let vacuum = report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["provider"] == "vacuum")
+        .unwrap();
+    assert_eq!(
+        vacuum["configuration_files"],
+        serde_json::json!(["specifications/openapi/vacuum.conf.yaml"])
+    );
+}

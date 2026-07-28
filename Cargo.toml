@@ -16,12 +16,11 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
 ignore = "0.4.25"
+libc = "0.2.180"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
 signal-hook = "0.3.18"
+tempfile = "3.24.0"
 thiserror = "2.0.18"
 toml = "1.0.6"
-
-[dev-dependencies]
-tempfile = "3.24.0"

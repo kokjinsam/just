@@ -14,6 +14,7 @@ use crate::formatting::{build_plan, execute_plan};
 use crate::linting;
 use crate::report::{Report, ReportStatus, render_human, render_json};
 use crate::selector::resolve_selectors;
+use crate::specification;
 use crate::workspace::{Workspace, invocation_directory};
 
 #[derive(Debug, Parser)]
@@ -39,7 +40,7 @@ pub enum FoundationCommand {
     Lint(SelectorArgs),
     Typecheck(SelectorArgs),
     Compile(SelectorArgs),
-    Spec,
+    Spec(SpecArgs),
     Test(SelectorArgs),
     Coverage(SelectorArgs),
     Verify,
@@ -52,6 +53,15 @@ pub struct SelectorArgs {
     pub selectors: Vec<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct SpecArgs {
+    #[arg(value_enum, value_name = "KIND")]
+    pub kind: Option<specification::SpecificationKind>,
+
+    #[arg(value_name = "NAME_OR_PATH")]
+    pub selections: Vec<String>,
+}
+
 impl FoundationCommand {
     #[must_use]
     pub const fn name(&self) -> &'static str {
@@ -60,7 +70,7 @@ impl FoundationCommand {
             Self::Lint(_) => "lint",
             Self::Typecheck(_) => "typecheck",
             Self::Compile(_) => "compile",
-            Self::Spec => "spec",
+            Self::Spec(_) => "spec",
             Self::Test(_) => "test",
             Self::Coverage(_) => "coverage",
             Self::Verify => "verify",
@@ -77,7 +87,8 @@ impl FoundationCommand {
             | Self::Compile(args)
             | Self::Test(args)
             | Self::Coverage(args) => &args.selectors,
-            Self::Spec | Self::Verify | Self::Doctor => &[],
+            Self::Spec(args) => &args.selections,
+            Self::Verify | Self::Doctor => &[],
         }
     }
 }
@@ -105,6 +116,9 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         Ok(workspace) => workspace,
         Err(error) => return render_error(cli.output, &error),
     };
+    if let FoundationCommand::Spec(args) = &cli.command {
+        return run_spec(cli, &workspace, args);
+    }
     let selections = match resolve_selectors(&workspace, cli.command.selectors()) {
         Ok(selections) => selections,
         Err(error) => return render_error(cli.output, &error),
@@ -142,6 +156,23 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         },
     }
     EXIT_USAGE
+}
+
+fn run_spec(cli: &Cli, workspace: &Workspace, args: &SpecArgs) -> u8 {
+    let plan = match specification::build_plan(workspace, args.kind, &args.selections) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) = match specification::execute_plan(
+        workspace,
+        &plan,
+        args.selections.clone(),
+        unix_timestamp(),
+    ) {
+        Ok(result) => result,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
 }
 
 fn run_format(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Selection]) -> u8 {

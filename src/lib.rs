@@ -11,4 +11,5 @@ pub mod ownership;
 pub mod plan;
 pub mod report;
 pub mod selector;
+pub mod specification;
 pub mod workspace;

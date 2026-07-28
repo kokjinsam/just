@@ -51,7 +51,15 @@ fn every_foundation_command_is_recognized_and_fails_closed() {
         );
     }
 
-    for command in ["spec", "test", "coverage", "verify"] {
+    let spec = run(&["spec"], &root);
+    assert_eq!(spec.status.code(), Some(0));
+    assert!(
+        String::from_utf8(spec.stderr)
+            .unwrap()
+            .contains("0 steps · passed")
+    );
+
+    for command in ["test", "coverage", "verify"] {
         let output = run(&[command], &root);
 
         assert_eq!(output.status.code(), Some(2), "{command}");
@@ -153,7 +161,7 @@ fn help_succeeds_but_invalid_usage_exits_two() {
     assert!(
         String::from_utf8(invalid.stderr)
             .unwrap()
-            .contains("unexpected argument")
+            .contains("invalid value")
     );
 }
 
@@ -202,7 +210,7 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
             Some(
                 if matches!(
                     command,
-                    "format" | "lint" | "typecheck" | "compile" | "doctor"
+                    "format" | "lint" | "typecheck" | "compile" | "spec" | "doctor"
                 ) {
                     0
                 } else {
