@@ -386,6 +386,51 @@ fn absent_threshold_omits_native_flags_but_forces_excoveralls_zero() {
 }
 
 #[test]
+fn vitest_coverage_routes_installed_adapters_without_overriding_v8() {
+    for (adapters, expected) in [
+        (
+            r#""@vitest/coverage-v8":"4""#,
+            vec![
+                "run",
+                "test",
+                "--coverage.enabled",
+                "--coverage.thresholds.lines=90",
+            ],
+        ),
+        (
+            r#""@vitest/coverage-istanbul":"4""#,
+            vec![
+                "run",
+                "test",
+                "--coverage.enabled",
+                "--coverage.provider=istanbul",
+                "--coverage.thresholds.lines=90",
+            ],
+        ),
+        (
+            r#""@vitest/coverage-v8":"4","@vitest/coverage-istanbul":"4""#,
+            vec![
+                "run",
+                "test",
+                "--coverage.enabled",
+                "--coverage.thresholds.lines=90",
+            ],
+        ),
+    ] {
+        let repository = repository();
+        write(
+            repository.path().join("apps/api/assets/package.json"),
+            &format!(
+                r#"{{"scripts":{{"test":"vitest"}},"devDependencies":{{"vitest":"4",{adapters}}}}}"#
+            ),
+        );
+
+        let coverage = plan(repository.path(), &["@api:web"], None, TestMode::Coverage);
+        assert_eq!(coverage.steps()[0].argv, expected);
+    }
+}
+
+#[test]
 fn missing_coverage_adapter_fails_closed() {
     let repository = repository();
     write(

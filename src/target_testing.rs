@@ -557,6 +557,12 @@ fn step(
                 OsString::from("test"),
                 OsString::from("--coverage.enabled"),
             ];
+            let package = read_package(&manifest.path)?;
+            if !package.has_dependency("@vitest/coverage-v8")
+                && package.has_dependency("@vitest/coverage-istanbul")
+            {
+                argv.push(OsString::from("--coverage.provider=istanbul"));
+            }
             if let Some(threshold) = threshold {
                 configuration_files.push(workspace.root.join("just.yaml"));
                 argv.push(OsString::from(format!(

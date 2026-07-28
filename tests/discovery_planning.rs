@@ -330,6 +330,31 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
 }
 
 #[test]
+fn istanbul_only_manifest_provides_vitest_coverage() {
+    let repository = repository();
+    fs::write(
+        repository
+            .path()
+            .join("apps/api/assets/package.json"),
+        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4","@vitest/coverage-istanbul":"4"}}"#,
+    )
+    .unwrap();
+    let workspace = Workspace::discover(repository.path()).unwrap();
+    let bindings = bindings_for_selections(
+        &workspace,
+        &[Selection::Component {
+            target: "api".into(),
+            component: "web".into(),
+        }],
+    )
+    .unwrap();
+
+    assert!(bindings.iter().any(|binding| {
+        binding.provider.as_str() == "vitest-coverage" && binding.capability == Capability::Coverage
+    }));
+}
+
+#[test]
 fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
     let repository = repository();
     fs::write(

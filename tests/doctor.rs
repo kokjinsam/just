@@ -261,7 +261,7 @@ fn target_coverage_adapters_are_reported_without_launching_tools() {
 
     fs::write(
         repository.path().join("app/assets/package.json"),
-        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4","@vitest/coverage-v8":"4"}}"#,
+        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4","@vitest/coverage-istanbul":"4"}}"#,
     )
     .unwrap();
     let ready = run(repository.path(), tools.path(), "json");
