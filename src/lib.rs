@@ -12,4 +12,5 @@ pub mod plan;
 pub mod report;
 pub mod selector;
 pub mod specification;
+pub mod target_testing;
 pub mod workspace;

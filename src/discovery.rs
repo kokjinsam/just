@@ -218,6 +218,7 @@ fn classify(workspace: &Workspace, path: &Path) -> Option<ResourceKind> {
             | ".sobelow-conf"
             | ".ex_dna.exs"
             | ".reach.exs"
+            | "coveralls.json"
             | "oxlint.config.js"
             | "oxlint.config.cjs"
             | "oxlint.config.mjs"

@@ -59,16 +59,19 @@ fn every_foundation_command_is_recognized_and_fails_closed() {
             .contains("0 steps · passed")
     );
 
-    for command in ["test", "coverage", "verify"] {
+    for command in ["test", "coverage"] {
         let output = run(&[command], &root);
 
-        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert_eq!(output.status.code(), Some(0), "{command}");
         assert!(output.stdout.is_empty(), "{command}");
-        assert_eq!(
-            String::from_utf8(output.stderr).unwrap(),
-            format!("error: command '{command}' is not implemented in milestone 1\n")
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("0 steps · passed")
         );
     }
+    let verify = run(&["verify"], &root);
+    assert_eq!(verify.status.code(), Some(2));
 }
 
 #[test]
@@ -210,7 +213,14 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
             Some(
                 if matches!(
                     command,
-                    "format" | "lint" | "typecheck" | "compile" | "spec" | "doctor"
+                    "format"
+                        | "lint"
+                        | "typecheck"
+                        | "compile"
+                        | "spec"
+                        | "test"
+                        | "coverage"
+                        | "doctor"
                 ) {
                     0
                 } else {

@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,7 @@ use crate::linting;
 use crate::report::{Report, ReportStatus, render_human, render_json};
 use crate::selector::resolve_selectors;
 use crate::specification;
+use crate::target_testing::{self, TestMode, TestSuite};
 use crate::workspace::{Workspace, invocation_directory};
 
 #[derive(Debug, Parser)]
@@ -41,7 +42,7 @@ pub enum FoundationCommand {
     Typecheck(SelectorArgs),
     Compile(SelectorArgs),
     Spec(SpecArgs),
-    Test(SelectorArgs),
+    Test(TestArgs),
     Coverage(SelectorArgs),
     Verify,
     Doctor,
@@ -51,6 +52,15 @@ pub enum FoundationCommand {
 pub struct SelectorArgs {
     #[arg(value_name = "SELECTOR")]
     pub selectors: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TestArgs {
+    #[arg(value_name = "SUITE_OR_SELECTOR")]
+    pub arguments: Vec<String>,
+
+    #[arg(last = true, value_name = "ARG")]
+    pub passthrough: Vec<OsString>,
 }
 
 #[derive(Debug, Args)]
@@ -85,8 +95,8 @@ impl FoundationCommand {
             | Self::Lint(args)
             | Self::Typecheck(args)
             | Self::Compile(args)
-            | Self::Test(args)
             | Self::Coverage(args) => &args.selectors,
+            Self::Test(args) => &args.arguments,
             Self::Spec(args) => &args.selections,
             Self::Verify | Self::Doctor => &[],
         }
@@ -119,6 +129,9 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
     if let FoundationCommand::Spec(args) = &cli.command {
         return run_spec(cli, &workspace, args);
     }
+    if let FoundationCommand::Test(args) = &cli.command {
+        return run_test(cli, &workspace, args);
+    }
     let selections = match resolve_selectors(&workspace, cli.command.selectors()) {
         Ok(selections) => selections,
         Err(error) => return render_error(cli.output, &error),
@@ -135,6 +148,9 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         FoundationCommand::Typecheck(_) | FoundationCommand::Compile(_)
     ) {
         return run_checking(cli, &workspace, &selections);
+    }
+    if matches!(cli.command, FoundationCommand::Coverage(_)) {
+        return run_target_testing(cli, &workspace, &selections, None, &[], TestMode::Coverage);
     }
     if matches!(cli.command, FoundationCommand::Doctor) {
         return run_doctor(cli, &workspace);
@@ -156,6 +172,63 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
         },
     }
     EXIT_USAGE
+}
+
+fn run_test(cli: &Cli, workspace: &Workspace, args: &TestArgs) -> u8 {
+    let (suite, selector_arguments) = match args.arguments.first() {
+        Some(first) if TestSuite::parse(first).is_some() => {
+            (TestSuite::parse(first), &args.arguments[1..])
+        }
+        Some(first)
+            if matches!(
+                first.as_str(),
+                "application" | "contract" | "e2e" | "visual" | "ui-property"
+            ) =>
+        {
+            return render_error(
+                cli.output,
+                &WorkflowError::Usage(format!("test suite '{first}' is reserved for milestone 8")),
+            );
+        }
+        _ => (None, args.arguments.as_slice()),
+    };
+    let selections = match resolve_selectors(workspace, selector_arguments) {
+        Ok(selections) => selections,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    run_target_testing(
+        cli,
+        workspace,
+        &selections,
+        suite,
+        &args.passthrough,
+        TestMode::Test,
+    )
+}
+
+fn run_target_testing(
+    cli: &Cli,
+    workspace: &Workspace,
+    selections: &[crate::selector::Selection],
+    suite: Option<TestSuite>,
+    passthrough: &[OsString],
+    mode: TestMode,
+) -> u8 {
+    let plan = match target_testing::build_plan(workspace, selections, suite, passthrough, mode) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) = match target_testing::execute_plan(
+        workspace,
+        &plan,
+        cli.command.selectors().to_vec(),
+        unix_timestamp(),
+        mode,
+    ) {
+        Ok(result) => result,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
 }
 
 fn run_spec(cli: &Cli, workspace: &Workspace, args: &SpecArgs) -> u8 {

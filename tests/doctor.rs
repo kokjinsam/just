@@ -35,7 +35,11 @@ fn repository() -> tempfile::TempDir {
         ),
     )
     .unwrap();
-    fs::write(repository.path().join("app/mix.exs"), "Mix.Project").unwrap();
+    fs::write(
+        repository.path().join("app/mix.exs"),
+        "defmodule Demo.MixProject do\n  use Mix.Project\n  def project, do: [test_coverage: [tool: ExCoveralls]]\n  defp deps, do: [{:excoveralls, \"0.18.5\", only: :test}]\nend\n",
+    )
+    .unwrap();
     fs::write(repository.path().join("app/.credo.exs"), "config").unwrap();
     fs::write(
         repository.path().join("app/assets/package.json"),
@@ -69,6 +73,8 @@ fn tools(repository: &Path) -> tempfile::TempDir {
         "cargo",
         "cargo-fmt",
         "cargo-clippy",
+        "cargo-nextest",
+        "cargo-llvm-cov",
         "cargo-dylint",
         "dylint-link",
         "java",
@@ -120,7 +126,15 @@ fn optional_dylint_is_skipped_and_doctor_launches_no_tools() {
             .iter()
             .all(|step| step["capability"] == "doctor-check")
     );
-    for provider in ["dialyzer", "mix-compile", "cargo-check"] {
+    for provider in [
+        "dialyzer",
+        "mix-compile",
+        "cargo-check",
+        "exunit",
+        "excoveralls",
+        "nextest",
+        "llvm-cov",
+    ] {
         assert_eq!(
             report["steps"]
                 .as_array()
@@ -147,6 +161,33 @@ fn optional_dylint_is_skipped_and_doctor_launches_no_tools() {
                 .contains("not applicable")
         );
     }
+}
+
+#[test]
+fn target_test_doctor_checks_exclude_the_application_test_workspace() {
+    let repository = repository();
+    fs::write(
+        repository.path().join("tests/package.json"),
+        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4"}}"#,
+    )
+    .unwrap();
+    let tools = tools(repository.path());
+    let output = run(repository.path(), tools.path(), "json");
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["steps"].as_array().unwrap().iter().all(|step| {
+        !matches!(
+            step["provider"].as_str(),
+            Some(
+                "package-test"
+                    | "vitest-coverage"
+                    | "nextest"
+                    | "llvm-cov"
+                    | "exunit"
+                    | "excoveralls"
+            )
+        ) || step["cwd"] != "tests"
+    }));
 }
 
 #[test]
@@ -189,6 +230,150 @@ fn declared_node_checking_scripts_require_pnpm_without_launching_it() {
         assert!(finding["stderr"].as_str().unwrap().contains("pnpm"));
     }
     assert!(!repository.path().join("launched").exists());
+}
+
+#[test]
+fn target_coverage_adapters_are_reported_without_launching_tools() {
+    let repository = repository();
+    fs::write(
+        repository.path().join("app/assets/package.json"),
+        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4"}}"#,
+    )
+    .unwrap();
+    let tools = tools(repository.path());
+    let missing = run(repository.path(), tools.path(), "json");
+    assert_eq!(missing.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    let coverage = report["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["provider"] == "vitest-coverage")
+        .unwrap();
+    assert_eq!(coverage["status"], "failed");
+    assert!(
+        coverage["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("coverage adapter")
+    );
+    assert!(!repository.path().join("launched").exists());
+
+    fs::write(
+        repository.path().join("app/assets/package.json"),
+        r#"{"scripts":{"test":"vitest"},"devDependencies":{"vitest":"4","@vitest/coverage-v8":"4"}}"#,
+    )
+    .unwrap();
+    let ready = run(repository.path(), tools.path(), "json");
+    assert_eq!(ready.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&ready.stdout).unwrap();
+    assert_eq!(
+        report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == "vitest-coverage")
+            .unwrap()["status"],
+        "passed"
+    );
+    assert!(!repository.path().join("launched").exists());
+}
+
+#[test]
+fn excoveralls_accepts_end_inside_project_atom_without_launching_tools() {
+    let repository = repository();
+    fs::write(
+        repository.path().join("app/mix.exs"),
+        concat!(
+            "defmodule Demo.MixProject do\n",
+            "  use Mix.Project\n",
+            "  def project,\n",
+            "    do: [\n",
+            "      app: :backend,\n",
+            "      test_coverage: [tool: ExCoveralls]\n",
+            "    ]\n",
+            "  defp deps, do: [{:excoveralls, \"0.18.5\", only: :test}]\n",
+            "end\n",
+        ),
+    )
+    .unwrap();
+    let tools = tools(repository.path());
+
+    let output = run(repository.path(), tools.path(), "json");
+
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == "excoveralls")
+            .unwrap()["status"],
+        "passed"
+    );
+    assert!(!repository.path().join("launched").exists());
+}
+
+#[test]
+fn excoveralls_readiness_failures_are_reported_without_launching_tools() {
+    let cases = [
+        (
+            "defmodule Demo.MixProject do\n  def project, do: [test_coverage: [tool: ExCoveralls]]\n  defp deps, do: [{:excoveralls, \"0.18.5\", only: :dev}]\nend\n",
+            None,
+            "ExCoveralls dependency is not available in MIX_ENV=test",
+        ),
+        (
+            "defmodule Demo.MixProject do\n  def project, do: []\n  defp deps, do: [{:excoveralls, \"0.18.5\", only: :test}]\nend\n",
+            None,
+            "Mix project does not declare test_coverage: [tool: ExCoveralls]",
+        ),
+        (
+            "defmodule Demo.MixProject do\n  # def project, do: [test_coverage: [tool: ExCoveralls]]\n  def project, do: []\n  # {:excoveralls, \"0.18.5\", only: :test}\n  defp deps, do: []\nend\n",
+            None,
+            "ExCoveralls dependency is not available in MIX_ENV=test",
+        ),
+        (
+            "defmodule Demo.MixProject do\n  def project, do: [test_coverage: [tool: ExCoveralls]]\n  defp deps, do: [{:excoveralls, \"0.18.5\"}]\nend\n",
+            Some("{invalid"),
+            "cannot parse",
+        ),
+        (
+            "defmodule Demo.MixProject do\n  def project, do: [test_coverage: [tool: ExCoveralls]]\n  defp deps, do: [{:excoveralls, \"0.18.5\"}]\nend\n",
+            Some("[]"),
+            "must contain a JSON object",
+        ),
+        (
+            "defmodule Demo.MixProject do\n  def project, do: [test_coverage: [tool: ExCoveralls]]\n  defp deps, do: [{:excoveralls, \"0.18.5\"}]\nend\n",
+            Some(r#"{"coverage_options":[]}"#),
+            "coverage_options must contain a JSON object",
+        ),
+    ];
+
+    for (manifest, coveralls, expected) in cases {
+        let repository = repository();
+        fs::write(repository.path().join("app/mix.exs"), manifest).unwrap();
+        if let Some(source) = coveralls {
+            fs::write(repository.path().join("app/coveralls.json"), source).unwrap();
+        }
+        let tools = tools(repository.path());
+        let output = run(repository.path(), tools.path(), "json");
+        assert_eq!(output.status.code(), Some(1), "{expected}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let finding = report["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["provider"] == "excoveralls")
+            .unwrap();
+        assert_eq!(finding["status"], "failed");
+        assert!(
+            finding["stderr"].as_str().unwrap().contains(expected),
+            "{}",
+            finding["stderr"]
+        );
+        assert!(!repository.path().join("launched").exists(), "{expected}");
+    }
 }
 
 #[test]

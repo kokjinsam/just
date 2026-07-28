@@ -18,6 +18,7 @@ pub enum Capability {
     Typecheck,
     Compile,
     TargetTest,
+    Coverage,
     SpecCheck,
     ApplicationTest,
     DoctorCheck,
@@ -179,6 +180,7 @@ fn add_direct_configuration_evidence(
             ".sobelow-conf",
             ".ex_dna.exs",
             ".reach.exs",
+            "coveralls.json",
         ],
         ResourceKind::NodeManifest => &[
             "oxlint.config.js",
@@ -390,6 +392,16 @@ fn mix_bindings(
             "",
         ),
     ];
+    if excoveralls_readiness(&resource.path).is_ready() {
+        bindings.push(binding(
+            resource,
+            &root,
+            Capability::Coverage,
+            "excoveralls",
+            &configs,
+            "coveralls.json",
+        ));
+    }
     for (file, provider) in [
         (".credo.exs", "credo"),
         (".sobelow-conf", "sobelow"),
@@ -411,6 +423,214 @@ fn mix_bindings(
         }
     }
     bindings
+}
+
+#[derive(Debug)]
+pub(crate) enum ExCoverallsReadiness {
+    Ready { configuration: serde_json::Value },
+    Invalid(String),
+}
+
+impl ExCoverallsReadiness {
+    pub(crate) const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+pub(crate) fn excoveralls_readiness(path: &Path) -> ExCoverallsReadiness {
+    let manifest = match fs::read_to_string(path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return ExCoverallsReadiness::Invalid(format!(
+                "cannot read Mix manifest '{}': {error}",
+                path.display()
+            ));
+        }
+    };
+    let manifest = sanitize_mix_source(&manifest);
+    let compact_manifest = compact_mix_source(&manifest);
+    if !mix_dependency_available_in_test(&compact_manifest) {
+        return ExCoverallsReadiness::Invalid(
+            "ExCoveralls dependency is not available in MIX_ENV=test".into(),
+        );
+    }
+    if !has_excoveralls_project_setting(&manifest) {
+        return ExCoverallsReadiness::Invalid(
+            "Mix project does not declare test_coverage: [tool: ExCoveralls]".into(),
+        );
+    }
+
+    let coveralls = path
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join("coveralls.json");
+    match fs::symlink_metadata(&coveralls) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ExCoverallsReadiness::Ready {
+                configuration: serde_json::json!({}),
+            };
+        }
+        Err(error) => {
+            return ExCoverallsReadiness::Invalid(format!(
+                "cannot inspect '{}': {error}",
+                coveralls.display()
+            ));
+        }
+    }
+    let source = match fs::read_to_string(&coveralls) {
+        Ok(source) => source,
+        Err(error) => {
+            return ExCoverallsReadiness::Invalid(format!(
+                "cannot read '{}': {error}",
+                coveralls.display()
+            ));
+        }
+    };
+    let configuration = match serde_json::from_str::<serde_json::Value>(&source) {
+        Ok(configuration) => configuration,
+        Err(error) => {
+            return ExCoverallsReadiness::Invalid(format!(
+                "cannot parse '{}': {error}",
+                coveralls.display()
+            ));
+        }
+    };
+    let Some(object) = configuration.as_object() else {
+        return ExCoverallsReadiness::Invalid(format!(
+            "'{}' must contain a JSON object",
+            coveralls.display()
+        ));
+    };
+    if object
+        .get("coverage_options")
+        .is_some_and(|options| !options.is_object())
+    {
+        return ExCoverallsReadiness::Invalid(format!(
+            "'{}' coverage_options must contain a JSON object",
+            coveralls.display()
+        ));
+    }
+    ExCoverallsReadiness::Ready { configuration }
+}
+
+fn sanitize_mix_source(source: &str) -> String {
+    let mut sanitized = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut commented = false;
+    for character in source.chars() {
+        if character == '\n' {
+            commented = false;
+            sanitized.push(character);
+            continue;
+        }
+        if commented {
+            sanitized.push(' ');
+            continue;
+        }
+        if quoted {
+            if character == '"' && !escaped {
+                quoted = false;
+                sanitized.push(character);
+            } else {
+                sanitized.push(' ');
+            }
+            escaped = character == '\\' && !escaped;
+            continue;
+        }
+        if character == '#' {
+            commented = true;
+            continue;
+        }
+        if character == '"' {
+            quoted = true;
+            escaped = false;
+            sanitized.push(character);
+            continue;
+        }
+        sanitized.push(character);
+    }
+    sanitized
+}
+
+fn compact_mix_source(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn mix_dependency_available_in_test(manifest: &str) -> bool {
+    let mut remainder = manifest;
+    while let Some(start) = remainder.find("{:excoveralls,") {
+        remainder = &remainder[start..];
+        let Some(end) = remainder.find('}') else {
+            return false;
+        };
+        let dependency = &remainder[..=end];
+        let Some(only) = dependency.find("only:") else {
+            return true;
+        };
+        let only = &dependency[only + "only:".len()..dependency.len() - 1];
+        if only
+            .strip_prefix(":test")
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(','))
+        {
+            return true;
+        }
+        if let Some(list) = only.strip_prefix('[').and_then(|list| list.split_once(']'))
+            && list.0.split(',').any(|environment| environment == ":test")
+        {
+            return true;
+        }
+        remainder = &remainder[end + 1..];
+    }
+    false
+}
+
+fn has_excoveralls_project_setting(manifest: &str) -> bool {
+    let marker = "test_coverage:[tool:ExCoveralls";
+    let tokens = mix_identifier_tokens(manifest);
+    let Some(project) = tokens.windows(2).position(|tokens| {
+        tokens[0].2 == "def" && tokens[1].2 == "project" && !token_is_atom(manifest, tokens[0].0)
+    }) else {
+        return false;
+    };
+    let body_start = tokens[project + 1].1;
+    let boundary = tokens[project + 2..]
+        .iter()
+        .find(|token| {
+            !token_is_atom(manifest, token.0) && matches!(token.2, "end" | "def" | "defp")
+        })
+        .map_or(manifest.len(), |token| token.0);
+    let project = compact_mix_source(&manifest[body_start..boundary]);
+    project.find(marker).is_some_and(|start| {
+        project[start + marker.len()..]
+            .chars()
+            .next()
+            .is_some_and(|character| matches!(character, ',' | ']'))
+    })
+}
+
+fn mix_identifier_tokens(source: &str) -> Vec<(usize, usize, &str)> {
+    let mut tokens = Vec::new();
+    let mut start = None;
+    for (index, character) in source.char_indices() {
+        if character.is_alphanumeric() || matches!(character, '_' | '?' | '!') {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            tokens.push((start, index, &source[start..index]));
+        }
+    }
+    if let Some(start) = start {
+        tokens.push((start, source.len(), &source[start..]));
+    }
+    tokens
+}
+
+fn token_is_atom(source: &str, start: usize) -> bool {
+    source[..start].ends_with(':')
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -501,6 +721,19 @@ fn node_bindings(
             bindings.push(binding(resource, &root, capability, provider, &configs, ""));
         }
     }
+    let has_vitest = has_dependency("vitest");
+    let has_coverage_adapter =
+        has_dependency("@vitest/coverage-v8") || has_dependency("@vitest/coverage-istanbul");
+    if package.scripts.contains_key("test") && has_vitest && has_coverage_adapter {
+        bindings.push(binding(
+            resource,
+            &root,
+            Capability::Coverage,
+            "vitest-coverage",
+            &configs,
+            "",
+        ));
+    }
     Ok(bindings)
 }
 
@@ -540,6 +773,14 @@ fn rust_bindings(
             "nextest",
             &configs,
             "nextest.toml",
+        ),
+        binding(
+            resource,
+            &root,
+            Capability::Coverage,
+            "llvm-cov",
+            &configs,
+            "",
         ),
     ];
     if let Some(declarations) = dylint_declaration(&resource.path, &configs)? {

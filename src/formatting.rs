@@ -805,6 +805,7 @@ const fn capability_name(capability: Capability) -> &'static str {
         Capability::Typecheck => "typecheck",
         Capability::Compile => "compile",
         Capability::TargetTest => "target_test",
+        Capability::Coverage => "coverage",
         Capability::SpecCheck => "spec_check",
         Capability::ApplicationTest => "application_test",
         Capability::DoctorCheck => "doctor_check",

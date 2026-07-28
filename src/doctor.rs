@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::capability::{Capability, dylint_declaration};
+use crate::capability::{
+    Capability, ExCoverallsReadiness, dylint_declaration, excoveralls_readiness,
+};
 use crate::discovery::{ResourceKind, discover_resources};
 use crate::error::WorkflowError;
 use crate::formatting::find_program;
@@ -57,6 +59,22 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                 checks.push(check(resource, "mix-format", "mix", Vec::new()));
                 checks.push(check(resource, "dialyzer", "mix", Vec::new()));
                 checks.push(check(resource, "mix-compile", "mix", Vec::new()));
+                if is_target_owner(&resource.owner) {
+                    checks.push(check(resource, "exunit", "mix", Vec::new()));
+                    match excoveralls_readiness(&resource.path) {
+                        ExCoverallsReadiness::Ready { .. } => {
+                            let coveralls = root.join("coveralls.json");
+                            let mut configuration_files = vec![workspace.root.join("just.yaml")];
+                            if coveralls.is_file() {
+                                configuration_files.push(coveralls);
+                            }
+                            checks.push(check(resource, "excoveralls", "mix", configuration_files));
+                        }
+                        ExCoverallsReadiness::Invalid(reason) => findings.push(
+                            failed_requirement_report(workspace, resource, "excoveralls", reason),
+                        ),
+                    }
+                }
                 for (file, provider) in [
                     (".credo.exs", "credo"),
                     (".sobelow-conf", "sobelow"),
@@ -111,6 +129,39 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                         findings.push(skipped_script_report(workspace, resource, provider, script));
                     }
                 }
+                if is_target_owner(&resource.owner) {
+                    let has_test = package
+                        .get("scripts")
+                        .and_then(|scripts| scripts.get("test"))
+                        .is_some();
+                    if has_test {
+                        checks.push(check(resource, "package-test", "pnpm", Vec::new()));
+                        if has("vitest")
+                            && (has("@vitest/coverage-v8") || has("@vitest/coverage-istanbul"))
+                        {
+                            checks.push(check(
+                                resource,
+                                "vitest-coverage",
+                                "pnpm",
+                                vec![workspace.root.join("just.yaml")],
+                            ));
+                        } else {
+                            findings.push(failed_requirement_report(
+                                workspace,
+                                resource,
+                                "vitest-coverage",
+                                "missing Vitest or a supported Vitest coverage adapter".into(),
+                            ));
+                        }
+                    } else {
+                        findings.push(skipped_script_report(
+                            workspace,
+                            resource,
+                            "package-test",
+                            "test",
+                        ));
+                    }
+                }
             }
             ResourceKind::CargoManifest => {
                 findings.push(manifest_report(workspace, resource, "cargo-manifest"));
@@ -127,6 +178,20 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
                     Vec::new(),
                 ));
                 checks.push(check(resource, "cargo-check", "cargo", Vec::new()));
+                if is_target_owner(&resource.owner) {
+                    checks.push(check_with_tools(
+                        resource,
+                        "nextest",
+                        &["cargo", "cargo-nextest"],
+                        Vec::new(),
+                    ));
+                    checks.push(check_with_tools(
+                        resource,
+                        "llvm-cov",
+                        &["cargo", "cargo-llvm-cov"],
+                        vec![workspace.root.join("just.yaml")],
+                    ));
+                }
             }
             ResourceKind::Specification
                 if resource
@@ -334,6 +399,10 @@ fn specification_configurations(path: &Path, root: &Path, names: &[&str]) -> Vec
     Vec::new()
 }
 
+fn is_target_owner(owner: &Owner) -> bool {
+    matches!(owner, Owner::Target(_) | Owner::Component { .. })
+}
+
 fn manifest_report(
     workspace: &Workspace,
     resource: &crate::discovery::DiscoveredResource,
@@ -508,6 +577,25 @@ fn failed_dylint_report(
     step_report(
         workspace,
         "dylint",
+        &manifest.owner,
+        manifest.path.parent().unwrap_or(Path::new("")),
+        vec![manifest.path.clone()],
+        Vec::new(),
+        StepStatus::Failed,
+        None,
+        diagnostic,
+    )
+}
+
+fn failed_requirement_report(
+    workspace: &Workspace,
+    manifest: &crate::discovery::DiscoveredResource,
+    provider: &str,
+    diagnostic: String,
+) -> StepReport {
+    step_report(
+        workspace,
+        provider,
         &manifest.owner,
         manifest.path.parent().unwrap_or(Path::new("")),
         vec![manifest.path.clone()],

@@ -259,6 +259,11 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
                 PathBuf::from("apps/api")
             ),
             ("exunit", Capability::TargetTest, PathBuf::from("apps/api")),
+            (
+                "excoveralls",
+                Capability::Coverage,
+                PathBuf::from("apps/api"),
+            ),
             ("credo", Capability::Lint, PathBuf::from("apps/api")),
             (
                 "rustfmt",
@@ -285,6 +290,11 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
                 Capability::TargetTest,
                 PathBuf::from("apps/api/native/parser"),
             ),
+            (
+                "llvm-cov",
+                Capability::Coverage,
+                PathBuf::from("apps/api/native/parser"),
+            ),
         ]
     );
     let nextest = bindings
@@ -298,6 +308,24 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
                 .root
                 .join("apps/api/native/parser/.config/nextest.toml")
         ]
+    );
+
+    fs::write(
+        repository.path().join("apps/api/mix.exs"),
+        "defmodule Fixture.MixProject do\n  use Mix.Project\n  def project, do: [app: :fixture]\n  defp deps, do: [{:excoveralls, \"~> 0.18\", only: :test}]\nend\n",
+    )
+    .unwrap();
+    let invalid_mix_bindings =
+        bindings_for_selections(&workspace, &[Selection::Target("api".into())]).unwrap();
+    assert!(
+        invalid_mix_bindings
+            .iter()
+            .any(|binding| binding.provider.as_str() == "exunit")
+    );
+    assert!(
+        !invalid_mix_bindings
+            .iter()
+            .any(|binding| binding.provider.as_str() == "excoveralls")
     );
 }
 
