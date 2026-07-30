@@ -793,8 +793,38 @@ pub fn execute_plan(
     started_at: String,
     mode: TestMode,
 ) -> Result<(Report, String, String), WorkflowError> {
+    let prepared = prepare_plan(workspace, plan, mode)?;
+    execute_prepared(workspace, &prepared, selectors, started_at)
+}
+
+pub(crate) struct PreparedPlan {
+    plan: Plan,
+    mode: TestMode,
+    reservations: HashMap<String, CoverallsReservation>,
+}
+
+pub(crate) fn prepare_plan(
+    workspace: &Workspace,
+    plan: &Plan,
+    mode: TestMode,
+) -> Result<PreparedPlan, WorkflowError> {
+    Ok(PreparedPlan {
+        plan: plan.clone(),
+        mode,
+        reservations: preflight(workspace, plan)?,
+    })
+}
+
+pub(crate) fn execute_prepared(
+    workspace: &Workspace,
+    prepared: &PreparedPlan,
+    selectors: Vec<String>,
+    started_at: String,
+) -> Result<(Report, String, String), WorkflowError> {
     let interrupt = InterruptGuard::install()?;
-    let reservations = preflight(workspace, plan)?;
+    let plan = &prepared.plan;
+    let mode = prepared.mode;
+    let reservations = &prepared.reservations;
     let started = Instant::now();
     let mut reports = Vec::new();
     let mut aggregate_stdout = String::new();

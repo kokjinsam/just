@@ -377,7 +377,8 @@ pub fn execute_plan(
     selectors: Vec<String>,
     started_at: String,
 ) -> Result<(Report, String, String), WorkflowError> {
-    execute_with_target(workspace, plan, None, selectors, started_at)
+    static_preflight(workspace, plan, None)?;
+    execute_preflighted(workspace, plan, None, selectors, started_at)
 }
 
 /// Executes an application plan after an optional target-test plan.
@@ -394,6 +395,37 @@ pub fn execute_with_target(
     started_at: String,
 ) -> Result<(Report, String, String), WorkflowError> {
     static_preflight(workspace, plan, target)?;
+    execute_preflighted(workspace, plan, target, selectors, started_at)
+}
+
+pub(crate) struct PreparedPlan {
+    plan: ApplicationPlan,
+}
+
+pub(crate) fn prepare_plan(
+    workspace: &Workspace,
+    plan: ApplicationPlan,
+) -> Result<PreparedPlan, WorkflowError> {
+    static_preflight(workspace, &plan, None)?;
+    Ok(PreparedPlan { plan })
+}
+
+pub(crate) fn execute_prepared(
+    workspace: &Workspace,
+    prepared: &mut PreparedPlan,
+    selectors: Vec<String>,
+    started_at: String,
+) -> Result<(Report, String, String), WorkflowError> {
+    execute_preflighted(workspace, &mut prepared.plan, None, selectors, started_at)
+}
+
+fn execute_preflighted(
+    workspace: &Workspace,
+    plan: &mut ApplicationPlan,
+    target: Option<&Plan>,
+    selectors: Vec<String>,
+    started_at: String,
+) -> Result<(Report, String, String), WorkflowError> {
     let started = Instant::now();
     let interrupt = InterruptGuard::install()?;
     let mut reports = Vec::new();

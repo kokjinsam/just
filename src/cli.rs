@@ -19,6 +19,7 @@ use crate::report::{Report, ReportStatus, render_human, render_json};
 use crate::selector::resolve_selectors;
 use crate::specification;
 use crate::target_testing::{self, TestMode, TestSuite};
+use crate::verification;
 use crate::workspace::{Workspace, invocation_directory};
 
 /// Parsed workflow command line.
@@ -193,6 +194,9 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
     }
     if matches!(cli.command, FoundationCommand::Coverage(_)) {
         return run_target_testing(cli, &workspace, &selections, None, &[], TestMode::Coverage);
+    }
+    if matches!(cli.command, FoundationCommand::Verify) {
+        return run_verification(cli, &workspace);
     }
     if matches!(cli.command, FoundationCommand::Doctor) {
         return run_doctor(cli, &workspace);
@@ -413,6 +417,19 @@ fn run_doctor(cli: &Cli, workspace: &Workspace) -> u8 {
         Err(error) => return render_error(cli.output, &error),
     };
     render_completed(cli.output, &report, "", "")
+}
+
+fn run_verification(cli: &Cli, workspace: &Workspace) -> u8 {
+    let plan = match verification::build_plan(workspace) {
+        Ok(plan) => plan,
+        Err(error) => return render_error(cli.output, &error),
+    };
+    let (report, child_stdout, child_stderr) =
+        match verification::execute_plan(workspace, plan, unix_timestamp()) {
+            Ok(result) => result,
+            Err(error) => return render_error(cli.output, &error),
+        };
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
 }
 
 #[expect(

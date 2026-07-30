@@ -32,5 +32,7 @@ pub mod selector;
 pub mod specification;
 /// Target test and coverage workflows.
 pub mod target_testing;
+/// Repository-wide verification planning and execution.
+pub mod verification;
 /// Workspace discovery and invocation context.
 pub mod workspace;

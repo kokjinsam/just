@@ -74,7 +74,12 @@ fn every_foundation_command_is_recognized_and_fails_closed() {
         );
     }
     let verify = run(&["verify"], &root);
-    assert_eq!(verify.status.code(), Some(2));
+    assert_eq!(verify.status.code(), Some(0));
+    assert!(
+        String::from_utf8(verify.stderr)
+            .unwrap()
+            .contains("2 steps · passed")
+    );
 }
 
 #[test]
@@ -223,6 +228,7 @@ fn foundation_commands_never_invoke_external_ecosystem_tools() {
                         | "spec"
                         | "test"
                         | "coverage"
+                        | "verify"
                         | "doctor"
                 ) {
                     0
