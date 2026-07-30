@@ -2,7 +2,7 @@
 name = "kokjinsam-just"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.97.1"
 publish = false
 
 [lib]
@@ -16,7 +16,6 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
 ignore = "0.4.25"
-libc = "0.2.180"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
@@ -25,3 +24,50 @@ signal-hook = "0.3.18"
 tempfile = "3.24.0"
 thiserror = "2.0.18"
 toml = "1.0.6"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["process"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+non_ascii_idents = "forbid"
+warnings = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+nonstandard_style = { level = "deny", priority = -1 }
+missing_docs = "deny"
+missing_debug_implementations = "deny"
+missing_copy_implementations = "deny"
+unfulfilled_lint_expectations = "deny"
+
+[lints.rustdoc]
+all = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+panic_in_result_fn = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+await_holding_lock = "deny"
+large_futures = "deny"
+exit = "deny"
+mem_forget = "deny"
+large_stack_arrays = "deny"
+large_types_passed_by_value = "deny"
+multiple_crate_versions = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+cognitive_complexity = "allow"

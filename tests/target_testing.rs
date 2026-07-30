@@ -1,4 +1,6 @@
+#![cfg(test)]
 #![cfg(unix)]
+//! Integration tests for target-test and coverage workflows.
 
 use std::ffi::OsString;
 use std::fs;
@@ -886,7 +888,10 @@ fn child_signal_two_stops_residual_process_group_members() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     if !descendant_path.is_file() {
-        let _ = unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+        let _ = rustix::process::kill_process(
+            rustix::process::Pid::from_child(&child),
+            rustix::process::Signal::KILL,
+        );
         let _ = child.wait();
         panic!("provider did not record its descendant before workflow exit {early_status:?}");
     }
@@ -904,19 +909,24 @@ fn child_signal_two_stops_residual_process_group_members() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     if status.is_none() {
-        let _ = unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
+        let _ = rustix::process::kill_process(
+            rustix::process::Pid::from_child(&child),
+            rustix::process::Signal::KILL,
+        );
         let _ = child.wait();
     }
     let mut descendant_gone = false;
     for _ in 0..100 {
-        if unsafe { libc::kill(descendant, 0) } != 0 {
+        if rustix::process::Pid::from_raw(descendant)
+            .is_none_or(|pid| rustix::process::test_kill_process(pid).is_err())
+        {
             descendant_gone = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    if !descendant_gone {
-        let _ = unsafe { libc::kill(descendant, libc::SIGKILL) };
+    if !descendant_gone && let Some(pid) = rustix::process::Pid::from_raw(descendant) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
 
     assert_eq!(status.and_then(|status| status.code()), Some(130));
@@ -954,11 +964,19 @@ fn real_sigint_stops_the_process_group_and_returns_130() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    assert_eq!(
+        rustix::process::kill_process(
+            rustix::process::Pid::from_child(&child),
+            rustix::process::Signal::INT,
+        ),
+        Ok(())
+    );
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(130));
     for _ in 0..100 {
-        if unsafe { libc::kill(descendant, 0) } != 0 {
+        if rustix::process::Pid::from_raw(descendant)
+            .is_none_or(|pid| rustix::process::test_kill_process(pid).is_err())
+        {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

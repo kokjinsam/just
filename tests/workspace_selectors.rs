@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for workspace and selector resolution.
+
 use std::ffi::OsStr;
 use std::path::Path;
 

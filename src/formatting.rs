@@ -1,3 +1,5 @@
+//! Formatting workflow planning, execution, and interruption control.
+
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -22,6 +24,12 @@ use crate::report::{Report, ReportStatus, StepReport, StepStatus};
 use crate::selector::Selection;
 use crate::workspace::Workspace;
 
+/// Builds a formatting plan for selected resources.
+///
+/// # Errors
+///
+/// Returns an error when discovery, provider configuration, or plan validation
+/// fails.
 pub fn build_plan(
     workspace: &Workspace,
     selections: &[Selection],
@@ -376,6 +384,12 @@ fn selection_selects_whole_binding(selection: &Selection, binding: &CapabilityBi
     }
 }
 
+/// Executes a formatting plan.
+///
+/// # Errors
+///
+/// Returns an error when preflight, provider execution, temporary-file
+/// handling, or reporting fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &Plan,
@@ -410,7 +424,6 @@ pub fn execute_plan(
         aggregate_stdout.push_str(&String::from_utf8_lossy(&output.stdout));
         aggregate_stderr.push_str(&String::from_utf8_lossy(&output.stderr));
         let step_interrupted = interrupt.received() || was_interrupted(&output);
-        let passed = output.status.success();
         reports.push(step_report(
             workspace,
             step,
@@ -420,9 +433,6 @@ pub fn execute_plan(
         if step_interrupted {
             interrupted = true;
             break;
-        }
-        if !passed {
-            continue;
         }
     }
 
@@ -606,7 +616,7 @@ fn run_tla_step(step: &Step, temporary: &Path) -> Result<Output, WorkflowError> 
     let output_argument = argv.last_mut().ok_or_else(|| {
         WorkflowError::Planning("TLA+ formatter output argument is missing".into())
     })?;
-    *output_argument = temporary.as_os_str().to_owned();
+    temporary.as_os_str().clone_into(output_argument);
 
     let mut command = Command::new(&step.program);
     let output = command
@@ -647,7 +657,7 @@ fn run_tla_step(step: &Step, temporary: &Path) -> Result<Output, WorkflowError> 
 }
 
 fn reserve_temporary(source: &Path) -> Result<PathBuf, WorkflowError> {
-    let directory = source.parent().unwrap_or(Path::new(""));
+    let directory = source.parent().unwrap_or_else(|| Path::new(""));
     let name = source
         .file_name()
         .unwrap_or_else(|| OsStr::new("source"))
@@ -659,7 +669,7 @@ fn reserve_temporary(source: &Path) -> Result<PathBuf, WorkflowError> {
         ));
         match create_reservation(&candidate, source) {
             Ok(_) => return Ok(candidate),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(WorkflowError::Planning(format!(
                     "cannot create same-directory TLA+ temporary file for '{}': {error}",

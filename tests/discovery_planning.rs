@@ -1,9 +1,14 @@
+#![cfg(test)]
+//! Integration tests for discovery, ownership, bindings, and plans.
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kokjinsam_just::capability::{Capability, ProviderId, bindings_for_selections};
+use kokjinsam_just::capability::{
+    Capability, CapabilityBinding, ProviderId, bindings_for_selections,
+};
 use kokjinsam_just::discovery::{ResourceKind, discover_resources};
 use kokjinsam_just::ownership::{Owner, Ownership, SystemResource};
 use kokjinsam_just::plan::{Plan, Step, StepId};
@@ -34,6 +39,47 @@ fn repository() -> tempfile::TempDir {
 
 fn relative(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap().to_path_buf()
+}
+
+fn assert_phoenix_binding_summary(root: &Path, bindings: &[CapabilityBinding]) {
+    let summary = bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.provider.as_str(),
+                binding.capability,
+                relative(root, &binding.root),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = [
+        ("oxfmt", Capability::Format, "apps/api/assets"),
+        ("oxfmt", Capability::FormatCheck, "apps/api/assets"),
+        ("oxlint", Capability::Lint, "apps/api/assets"),
+        ("stylelint", Capability::Lint, "apps/api/assets"),
+        ("package-build", Capability::Compile, "apps/api/assets"),
+        ("package-test", Capability::TargetTest, "apps/api/assets"),
+        (
+            "package-typecheck",
+            Capability::Typecheck,
+            "apps/api/assets",
+        ),
+        ("mix-format", Capability::Format, "apps/api"),
+        ("mix-format", Capability::FormatCheck, "apps/api"),
+        ("dialyzer", Capability::Typecheck, "apps/api"),
+        ("mix-compile", Capability::Compile, "apps/api"),
+        ("exunit", Capability::TargetTest, "apps/api"),
+        ("excoveralls", Capability::Coverage, "apps/api"),
+        ("credo", Capability::Lint, "apps/api"),
+        ("rustfmt", Capability::Format, "apps/api/native/parser"),
+        ("rustfmt", Capability::FormatCheck, "apps/api/native/parser"),
+        ("clippy", Capability::Lint, "apps/api/native/parser"),
+        ("cargo-check", Capability::Compile, "apps/api/native/parser"),
+        ("nextest", Capability::TargetTest, "apps/api/native/parser"),
+        ("llvm-cov", Capability::Coverage, "apps/api/native/parser"),
+    ]
+    .map(|(provider, capability, path)| (provider, capability, PathBuf::from(path)));
+    assert_eq!(summary, expected);
 }
 
 #[test]
@@ -201,102 +247,7 @@ fn phoenix_evidence_produces_deterministic_deduplicated_bindings() {
     .unwrap();
 
     let bindings = bindings_for_selections(&workspace, &selections).unwrap();
-    let summary = bindings
-        .iter()
-        .map(|binding| {
-            (
-                binding.provider.as_str(),
-                binding.capability,
-                relative(&workspace.root, &binding.root),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        summary,
-        vec![
-            (
-                "oxfmt",
-                Capability::Format,
-                PathBuf::from("apps/api/assets")
-            ),
-            (
-                "oxfmt",
-                Capability::FormatCheck,
-                PathBuf::from("apps/api/assets")
-            ),
-            ("oxlint", Capability::Lint, PathBuf::from("apps/api/assets")),
-            (
-                "stylelint",
-                Capability::Lint,
-                PathBuf::from("apps/api/assets"),
-            ),
-            (
-                "package-build",
-                Capability::Compile,
-                PathBuf::from("apps/api/assets"),
-            ),
-            (
-                "package-test",
-                Capability::TargetTest,
-                PathBuf::from("apps/api/assets"),
-            ),
-            (
-                "package-typecheck",
-                Capability::Typecheck,
-                PathBuf::from("apps/api/assets"),
-            ),
-            ("mix-format", Capability::Format, PathBuf::from("apps/api")),
-            (
-                "mix-format",
-                Capability::FormatCheck,
-                PathBuf::from("apps/api"),
-            ),
-            ("dialyzer", Capability::Typecheck, PathBuf::from("apps/api"),),
-            (
-                "mix-compile",
-                Capability::Compile,
-                PathBuf::from("apps/api")
-            ),
-            ("exunit", Capability::TargetTest, PathBuf::from("apps/api")),
-            (
-                "excoveralls",
-                Capability::Coverage,
-                PathBuf::from("apps/api"),
-            ),
-            ("credo", Capability::Lint, PathBuf::from("apps/api")),
-            (
-                "rustfmt",
-                Capability::Format,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-            (
-                "rustfmt",
-                Capability::FormatCheck,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-            (
-                "clippy",
-                Capability::Lint,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-            (
-                "cargo-check",
-                Capability::Compile,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-            (
-                "nextest",
-                Capability::TargetTest,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-            (
-                "llvm-cov",
-                Capability::Coverage,
-                PathBuf::from("apps/api/native/parser"),
-            ),
-        ]
-    );
+    assert_phoenix_binding_summary(&workspace.root, &bindings);
     let nextest = bindings
         .iter()
         .find(|binding| binding.provider.as_str() == "nextest")
@@ -354,17 +305,14 @@ fn istanbul_only_manifest_provides_vitest_coverage() {
     }));
 }
 
-#[test]
-fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
-    let repository = repository();
+fn prepare_binding_edge_cases(repository: &Path) -> (PathBuf, PathBuf) {
     fs::write(
-        repository.path().join("Cargo.toml"),
+        repository.join("Cargo.toml"),
         "[package]\nname = \"root\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-
-    let ignored_package = repository.path().join("ignored/tool/package.json");
-    let ignored_source = repository.path().join("ignored/application/src/app.ts");
+    let ignored_package = repository.join("ignored/tool/package.json");
+    let ignored_source = repository.join("ignored/application/src/app.ts");
     fs::create_dir_all(ignored_package.parent().unwrap()).unwrap();
     fs::create_dir_all(ignored_source.parent().unwrap()).unwrap();
     fs::write(&ignored_package, r#"{"devDependencies":{"oxfmt":"0.1.0"}}"#).unwrap();
@@ -380,20 +328,22 @@ fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
     .unwrap();
     fs::write(&ignored_source, "export const ignored = true;").unwrap();
 
-    let nested_mix = repository.path().join("apps/api/tools/child/mix.exs");
+    let nested_mix = repository.join("apps/api/tools/child/mix.exs");
     fs::create_dir_all(nested_mix.parent().unwrap()).unwrap();
     fs::write(&nested_mix, "defmodule Child.MixProject do\nend\n").unwrap();
     fs::write(nested_mix.parent().unwrap().join(".reach.exs"), "%{}").unwrap();
 
-    let nextest = repository
-        .path()
-        .join("apps/api/native/parser/.config/nextest.toml");
-    fs::remove_file(nextest).unwrap();
-    let unrelated_nextest = repository
-        .path()
-        .join("apps/api/native/parser/docs/nextest.toml");
+    fs::remove_file(repository.join("apps/api/native/parser/.config/nextest.toml")).unwrap();
+    let unrelated_nextest = repository.join("apps/api/native/parser/docs/nextest.toml");
     fs::create_dir_all(unrelated_nextest.parent().unwrap()).unwrap();
     fs::write(unrelated_nextest, "[profile.default]\n").unwrap();
+    (ignored_package, ignored_source)
+}
+
+#[test]
+fn binding_planning_retains_repository_ignored_and_nearest_manifest_evidence() {
+    let repository = repository();
+    let (ignored_package, ignored_source) = prepare_binding_edge_cases(repository.path());
 
     let workspace = Workspace::discover(repository.path()).unwrap();
     let repository_bindings =

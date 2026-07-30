@@ -1,3 +1,5 @@
+//! Validated executable workflow plans.
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -6,43 +8,66 @@ use crate::capability::{Capability, ProviderId};
 use crate::error::WorkflowError;
 use crate::ownership::Owner;
 
+/// Stable identifier for a workflow step.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StepId(String);
 
 impl StepId {
+    /// Creates a step identifier.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Returns the identifier text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// One provider invocation in a workflow plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
+    /// Stable step identifier.
     pub id: StepId,
+    /// Human-readable label.
     pub label: String,
+    /// Capability implemented by the step.
     pub capability: Capability,
+    /// Provider that implements the step.
     pub provider: ProviderId,
+    /// Resource owner.
     pub owner: Owner,
+    /// Provider working directory.
     pub cwd: PathBuf,
+    /// Provider executable.
     pub program: OsString,
+    /// Provider arguments.
     pub argv: Vec<OsString>,
+    /// Provider environment additions.
     pub env: BTreeMap<OsString, OsString>,
+    /// Provider target paths.
     pub targets: Vec<PathBuf>,
+    /// Configuration evidence.
     pub configuration_files: Vec<PathBuf>,
+    /// Step dependencies.
     pub depends_on: Vec<StepId>,
 }
 
+/// A deduplicated, dependency-validated workflow plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     steps: Vec<Step>,
 }
 
 impl Plan {
+    /// Validates and constructs a plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for conflicting identifiers, missing dependencies, or
+    /// dependency cycles.
     pub fn new(steps: Vec<Step>) -> Result<Self, WorkflowError> {
         let mut unique = Vec::new();
         let mut positions = HashMap::<StepId, usize>::new();
@@ -82,6 +107,7 @@ impl Plan {
         Ok(Self { steps: unique })
     }
 
+    /// Returns the plan steps in deterministic execution order.
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         &self.steps

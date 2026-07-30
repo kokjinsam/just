@@ -1,4 +1,6 @@
+#![cfg(test)]
 #![cfg(unix)]
+//! Integration tests for type-checking and compilation workflows.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

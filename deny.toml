@@ -1,0 +1,34 @@
+[graph]
+targets = []
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Unlicense"]
+confidence-threshold = 0.8
+exceptions = [
+    { allow = ["Unicode-3.0"], crate = "unicode-ident" },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = false
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

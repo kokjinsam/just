@@ -1,4 +1,6 @@
+#![cfg(test)]
 #![cfg(unix)]
+//! Integration tests for doctor diagnostics.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

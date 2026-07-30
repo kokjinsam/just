@@ -1,4 +1,6 @@
+#![cfg(test)]
 #![cfg(unix)]
+//! Integration tests for specification workflows.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -154,6 +156,35 @@ fn plans_tla_alloy_and_openapi_in_deterministic_order_with_configuration_evidenc
     .unwrap();
     assert_eq!(named.steps().len(), 1);
     assert_eq!(named.steps()[0].provider.as_str(), "apalache");
+}
+
+#[test]
+fn dotted_bare_openapi_name_resolves_by_file_stem() {
+    let repository = repository();
+    write(
+        repository.path().join("specs/openapi/api.v1.yaml"),
+        "openapi: 3.1.0",
+    );
+    let workspace = Workspace::discover(repository.path()).unwrap();
+
+    let plan = build_plan(
+        &workspace,
+        Some(SpecificationKind::Openapi),
+        &["api.v1".into()],
+    )
+    .unwrap();
+
+    let expected = repository
+        .path()
+        .join("specs/openapi/api.v1.yaml")
+        .canonicalize()
+        .unwrap();
+    assert_eq!(plan.steps().len(), 2);
+    assert!(
+        plan.steps()
+            .iter()
+            .all(|step| step.targets == [expected.clone()])
+    );
 }
 
 #[test]

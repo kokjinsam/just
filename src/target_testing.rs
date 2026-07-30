@@ -1,3 +1,5 @@
+//! Target-level testing and coverage planning and execution.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -29,15 +31,21 @@ const EXCOVERALLS_BOOTSTRAP: &str = concat!(
     "Mix.Task.run(\"coveralls\", [])"
 );
 
+/// Supported target-test suite filters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestSuite {
+    /// Unit tests.
     Unit,
+    /// Integration tests.
     Integration,
+    /// Model-based tests.
     Model,
+    /// Property-based tests.
     Property,
 }
 
 impl TestSuite {
+    /// Parses a CLI suite name.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -49,6 +57,7 @@ impl TestSuite {
         }
     }
 
+    /// Returns the stable CLI suite name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -60,12 +69,21 @@ impl TestSuite {
     }
 }
 
+/// Target-test execution mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
+    /// Run tests.
     Test,
+    /// Measure coverage.
     Coverage,
 }
 
+/// Builds a target-test or coverage plan.
+///
+/// # Errors
+///
+/// Returns an error when selections, suite routing, passthrough arguments, or
+/// provider configuration is invalid.
 pub fn build_plan(
     workspace: &Workspace,
     selections: &[Selection],
@@ -93,19 +111,17 @@ pub fn build_plan(
         };
         let direct_targets =
             direct_targets_for(&manifest, selections, &selection_manifests, provider, mode);
-        let supports_suite = suite
-            .map(|suite| suite_supported_by(workspace, &manifest, provider, suite, selections))
-            .transpose()?
-            .unwrap_or(true);
-        if !supports_suite {
-            planned.push(PlannedStep::Skipped {
-                manifest,
-                provider,
-                suite: suite.expect("unsupported suite requires a suite"),
-            });
-            continue;
+        if let Some(suite) = suite {
+            if !suite_supported_by(workspace, &manifest, provider, suite, selections)? {
+                planned.push(PlannedStep::Skipped {
+                    manifest,
+                    provider,
+                    suite,
+                });
+                continue;
+            }
+            suite_supported += 1;
         }
-        suite_supported += usize::from(suite.is_some());
         planned.push(PlannedStep::Executable {
             manifest,
             provider,
@@ -180,7 +196,10 @@ impl PlannedStep {
     }
 
     fn root(&self) -> &Path {
-        self.manifest().path.parent().unwrap_or(Path::new(""))
+        self.manifest()
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
     }
 }
 
@@ -237,7 +256,7 @@ fn direct_targets_for(
         if path.is_dir()
             || !safe_test_file(
                 path,
-                manifest.path.parent().unwrap_or(Path::new("")),
+                manifest.path.parent().unwrap_or_else(|| Path::new("")),
                 provider,
             )
         {
@@ -270,7 +289,6 @@ fn safe_test_file(path: &Path, root: &Path, provider: &str) -> bool {
                 Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts")
             ) && name.is_some_and(|name| name.contains(".test.") || name.contains(".spec."))
         }
-        "nextest" => false,
         _ => false,
     }
 }
@@ -302,7 +320,6 @@ fn suite_supported_by(
             })?;
             Ok(contains_key(&document, "proptest"))
         }
-        "nextest" => Ok(false),
         _ => Ok(false),
     }
 }
@@ -313,7 +330,7 @@ fn exunit_suite_evidence(
     suite: TestSuite,
     selections: &[Selection],
 ) -> Result<bool, WorkflowError> {
-    let root = manifest.path.parent().unwrap_or(Path::new(""));
+    let root = manifest.path.parent().unwrap_or_else(|| Path::new(""));
     let ownership = Ownership::new(&workspace.config);
     let mut files = git_visible_files(workspace, root)?;
     files.extend(selections.iter().filter_map(|selection| {
@@ -468,7 +485,7 @@ fn step(
     let root = manifest
         .path
         .parent()
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
     if let PlannedStep::Skipped {
         provider, suite, ..
@@ -495,7 +512,9 @@ fn step(
         ..
     } = planned
     else {
-        unreachable!("skipped steps returned above");
+        return Err(WorkflowError::Planning(
+            "skipped target-test step reached executable planning".into(),
+        ));
     };
     let effective_provider = coverage_provider(&manifest, provider, mode)?;
     let capability = if mode == TestMode::Coverage {
@@ -504,15 +523,83 @@ fn step(
         Capability::TargetTest
     };
     let threshold = coverage_threshold(workspace, &manifest.owner);
+    let StepCommand {
+        program,
+        mut argv,
+        env,
+        mut configuration_files,
+    } = step_command(&StepCommandContext {
+        workspace,
+        manifest: &manifest,
+        root: &root,
+        provider,
+        mode,
+        suite,
+        direct_targets: &direct_targets,
+        threshold,
+    })?;
+    if mode == TestMode::Coverage {
+        argv.shrink_to_fit();
+    }
+    configuration_files.sort();
+    configuration_files.dedup();
+    Ok(Step {
+        id: StepId::new(format!(
+            "{}:{index:04}:{effective_provider}",
+            capability_name(capability)
+        )),
+        label: format!("{} {effective_provider}", capability_name(capability)),
+        capability,
+        provider: ProviderId::new(effective_provider),
+        owner: manifest.owner,
+        cwd: root,
+        program: OsString::from(program),
+        argv,
+        env,
+        targets: direct_targets,
+        configuration_files,
+        depends_on: Vec::new(),
+    })
+}
+
+struct StepCommandContext<'a> {
+    workspace: &'a Workspace,
+    manifest: &'a DiscoveredResource,
+    root: &'a Path,
+    provider: &'a str,
+    mode: TestMode,
+    suite: Option<TestSuite>,
+    direct_targets: &'a [PathBuf],
+    threshold: Option<u8>,
+}
+
+struct StepCommand {
+    program: &'static str,
+    argv: Vec<OsString>,
+    env: BTreeMap<OsString, OsString>,
+    configuration_files: Vec<PathBuf>,
+}
+
+fn step_command(context: &StepCommandContext<'_>) -> Result<StepCommand, WorkflowError> {
+    let &StepCommandContext {
+        workspace,
+        manifest,
+        root,
+        provider,
+        mode,
+        suite,
+        direct_targets,
+        threshold,
+    } = context;
     let mut configuration_files = vec![manifest.path.clone()];
     let mut env = BTreeMap::new();
-    let (program, mut argv) = match (mode, provider) {
+    let (program, argv) = match (mode, provider) {
         (TestMode::Test, "exunit") => {
             let mut argv = vec![OsString::from("test")];
             if let Some(suite) = suite {
                 argv.extend([OsString::from("--only"), OsString::from(suite.as_str())]);
             }
-            argv.extend(relative_targets(&root, &direct_targets));
+            argv.extend(relative_targets(root, direct_targets));
             ("mix", argv)
         }
         (TestMode::Test, "package-test") => {
@@ -521,7 +608,7 @@ fn step(
                 |suite| format!("test:{}", suite.as_str()),
             );
             let mut argv = vec![OsString::from("run"), OsString::from(script)];
-            argv.extend(relative_targets(&root, &direct_targets));
+            argv.extend(relative_targets(root, direct_targets));
             ("pnpm", argv)
         }
         (TestMode::Test, "nextest") => (
@@ -588,27 +675,11 @@ fn step(
             )));
         }
     };
-    if mode == TestMode::Coverage {
-        argv.shrink_to_fit();
-    }
-    configuration_files.sort();
-    configuration_files.dedup();
-    Ok(Step {
-        id: StepId::new(format!(
-            "{}:{index:04}:{effective_provider}",
-            capability_name(capability)
-        )),
-        label: format!("{} {effective_provider}", capability_name(capability)),
-        capability,
-        provider: ProviderId::new(effective_provider),
-        owner: manifest.owner,
-        cwd: root,
-        program: OsString::from(program),
+    Ok(StepCommand {
+        program,
         argv,
         env,
-        targets: direct_targets,
         configuration_files,
-        depends_on: Vec::new(),
     })
 }
 
@@ -656,7 +727,11 @@ fn coverage_provider(
 fn missing_adapter(manifest: &DiscoveredResource, adapter: &str) -> WorkflowError {
     WorkflowError::Planning(format!(
         "selected test-capable component at '{}' requires {adapter} for coverage",
-        manifest.path.parent().unwrap_or(Path::new("")).display()
+        manifest
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .display()
     ))
 }
 
@@ -705,6 +780,12 @@ fn owner_key(owner: &Owner) -> String {
     }
 }
 
+/// Executes a target-test or coverage plan.
+///
+/// # Errors
+///
+/// Returns an error when preflight, provider execution, interruption cleanup,
+/// or report construction fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &Plan,
@@ -863,15 +944,15 @@ fn reserve_coveralls(
             return Err(WorkflowError::Configuration(reason));
         }
     };
-    let object = document
-        .as_object_mut()
-        .expect("ready ExCoveralls configuration has an object root");
+    let object = document.as_object_mut().ok_or_else(|| {
+        WorkflowError::Configuration("ExCoveralls configuration root must be an object".into())
+    })?;
     let coverage_options = object
         .entry("coverage_options")
         .or_insert_with(|| serde_json::json!({}));
-    let coverage_options = coverage_options
-        .as_object_mut()
-        .expect("ready ExCoveralls coverage_options is an object");
+    let coverage_options = coverage_options.as_object_mut().ok_or_else(|| {
+        WorkflowError::Configuration("ExCoveralls coverage_options must be an object".into())
+    })?;
     let threshold = step
         .env
         .get(OsStr::new("JUST_COVERAGE_LINES"))
@@ -954,6 +1035,13 @@ fn run_command(
     let stderr_reader = std::thread::spawn(move || read_output(stderr));
     loop {
         if interrupt.received() {
+            #[cfg_attr(
+                unix,
+                expect(
+                    clippy::unnecessary_mut_passed,
+                    reason = "the shared call must also compile with the mutable non-Unix helper"
+                )
+            )]
             terminate(&mut child).map_err(|error| {
                 WorkflowError::Planning(format!(
                     "could not stop interrupted target-test tool '{}': {error}",
@@ -976,7 +1064,11 @@ fn run_command(
         })? {
             Some(status) => {
                 #[cfg(unix)]
-                if provider_received_sigint(&status) {
+                if provider_received_sigint(status) {
+                    #[expect(
+                        clippy::unnecessary_mut_passed,
+                        reason = "the shared call stays compatible with the mutable non-Unix helper"
+                    )]
                     terminate(&mut child).map_err(|error| {
                         WorkflowError::Planning(format!(
                             "could not stop interrupted target-test tool '{}': {error}",
@@ -992,26 +1084,18 @@ fn run_command(
 }
 
 #[cfg(unix)]
-fn provider_received_sigint(status: &std::process::ExitStatus) -> bool {
+fn provider_received_sigint(status: std::process::ExitStatus) -> bool {
     use std::os::unix::process::ExitStatusExt;
 
-    status.signal() == Some(libc::SIGINT)
+    status.signal() == Some(rustix::process::Signal::INT.as_raw())
 }
 
 #[cfg(unix)]
-fn terminate(child: &mut std::process::Child) -> std::io::Result<()> {
-    let process_group = i32::try_from(child.id())
-        .map_err(|error| std::io::Error::other(format!("invalid child process id: {error}")))?;
-    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
-        }
+fn terminate(child: &std::process::Child) -> std::io::Result<()> {
+    let process_group = rustix::process::Pid::from_child(child);
+    match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from_raw_os_error(error.raw_os_error())),
     }
 }
 
@@ -1054,13 +1138,17 @@ fn skipped_report(workspace: &Workspace, step: &Step) -> StepReport {
     report_fields(
         workspace,
         step,
-        StepStatus::Skipped,
-        None,
-        0,
-        Vec::new(),
-        Some("not applicable: provider does not configure the requested suite".into()),
-        String::new(),
-        String::new(),
+        ReportOutput {
+            status: StepStatus::Skipped,
+            exit_code: None,
+            duration: 0,
+            argv: Vec::new(),
+            skip_reason: Some(
+                "not applicable: provider does not configure the requested suite".into(),
+            ),
+            stdout: String::new(),
+            stderr: String::new(),
+        },
     )
 }
 
@@ -1079,24 +1167,23 @@ fn command_report(
     report_fields(
         workspace,
         step,
-        if output.status.success() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        ReportOutput {
+            status: if output.status.success() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            exit_code: output.status.code(),
+            duration,
+            argv,
+            skip_reason: None,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        output.status.code(),
-        duration,
-        argv,
-        None,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report_fields(
-    workspace: &Workspace,
-    step: &Step,
+struct ReportOutput {
     status: StepStatus,
     exit_code: Option<i32>,
     duration: u64,
@@ -1104,7 +1191,9 @@ fn report_fields(
     skip_reason: Option<String>,
     stdout: String,
     stderr: String,
-) -> StepReport {
+}
+
+fn report_fields(workspace: &Workspace, step: &Step, output: ReportOutput) -> StepReport {
     let (target, component) = match &step.owner {
         Owner::Target(target) => (Some(target.clone()), None),
         Owner::Component { target, component } => (Some(target.clone()), component.clone()),
@@ -1123,19 +1212,19 @@ fn report_fields(
         target,
         component,
         cwd: relative(&step.cwd),
-        argv,
+        argv: output.argv,
         configuration_files: step
             .configuration_files
             .iter()
             .map(|path| relative(path))
             .collect(),
         targets: step.targets.iter().map(|path| relative(path)).collect(),
-        status,
-        exit_code,
-        duration,
-        skip_reason,
-        stdout,
-        stderr,
+        status: output.status,
+        exit_code: output.exit_code,
+        duration: output.duration,
+        skip_reason: output.skip_reason,
+        stdout: output.stdout,
+        stderr: output.stderr,
     }
 }
 

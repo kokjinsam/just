@@ -1,3 +1,5 @@
+//! Mapping discovered evidence to workflow capabilities and providers.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,45 +12,72 @@ use crate::ownership::{Owner, Ownership};
 use crate::selector::Selection;
 use crate::workspace::Workspace;
 
+/// Workflow capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Capability {
+    /// Apply formatting.
     Format,
+    /// Check formatting without mutation.
     FormatCheck,
+    /// Run linters.
     Lint,
+    /// Run type checkers.
     Typecheck,
+    /// Compile or build targets.
     Compile,
+    /// Run target-level tests.
     TargetTest,
+    /// Measure target-level coverage.
     Coverage,
+    /// Check executable specifications.
     SpecCheck,
+    /// Run application-level tests.
     ApplicationTest,
+    /// Inspect provider readiness.
     DoctorCheck,
 }
 
+/// Stable provider identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ProviderId(String);
 
 impl ProviderId {
+    /// Creates a provider identifier.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Returns the identifier text.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+/// Evidence-backed capability binding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapabilityBinding {
+    /// Bound capability.
     pub capability: Capability,
+    /// Selected provider.
     pub provider: ProviderId,
+    /// Evidence owner.
     pub owner: Owner,
+    /// Provider root.
     pub root: PathBuf,
+    /// Primary evidence path.
     pub evidence: PathBuf,
+    /// Additional configuration evidence.
     pub configuration_files: Vec<PathBuf>,
 }
 
+/// Produces capability bindings for admitted selections.
+///
+/// # Errors
+///
+/// Returns an error when discovery, ownership, or provider configuration is
+/// invalid.
 pub fn bindings_for_selections(
     workspace: &Workspace,
     selections: &[Selection],
@@ -172,7 +201,7 @@ fn add_direct_configuration_evidence(
     resources: &mut Vec<DiscoveredResource>,
     resource_paths: &mut HashSet<PathBuf>,
 ) -> Result<(), WorkflowError> {
-    let root = manifest.parent().unwrap_or(Path::new(""));
+    let root = manifest.parent().unwrap_or_else(|| Path::new(""));
     let names: &[&str] = match kind {
         ResourceKind::MixManifest => &[
             ".formatter.exs",
@@ -347,7 +376,7 @@ fn mix_bindings(
     let root = resource
         .path
         .parent()
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
     let configs = configurations_for_manifest(resource, resources);
     let mut bindings = vec![
@@ -462,7 +491,7 @@ pub(crate) fn excoveralls_readiness(path: &Path) -> ExCoverallsReadiness {
 
     let coveralls = path
         .parent()
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|| Path::new(""))
         .join("coveralls.json");
     match fs::symlink_metadata(&coveralls) {
         Ok(_) => {}
@@ -661,7 +690,7 @@ fn node_bindings(
     let root = resource
         .path
         .parent()
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
     let configs = configurations_for_manifest(resource, resources);
     let has_dependency = |name: &str| {
@@ -744,7 +773,7 @@ fn rust_bindings(
     let root = resource
         .path
         .parent()
-        .unwrap_or(Path::new(""))
+        .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
     let configs = configurations_for_manifest(resource, resources);
     let mut bindings = vec![
@@ -806,6 +835,12 @@ fn rust_bindings(
     Ok(bindings)
 }
 
+/// Reads a Cargo manifest's Dylint library declaration.
+///
+/// # Errors
+///
+/// Returns an error when the manifest or referenced Dylint configuration
+/// cannot be read or parsed.
 pub fn dylint_declaration(
     cargo_manifest: &Path,
     configurations: &[PathBuf],
@@ -1025,7 +1060,7 @@ fn direct_binding(
         root: resource
             .path
             .parent()
-            .unwrap_or(Path::new(""))
+            .unwrap_or_else(|| Path::new(""))
             .to_path_buf(),
         evidence: resource.path.clone(),
         configuration_files: Vec::new(),

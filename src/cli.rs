@@ -1,3 +1,5 @@
+//! Command-line parsing, dispatch, rendering, and exit-code mapping.
+
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -19,61 +21,86 @@ use crate::specification;
 use crate::target_testing::{self, TestMode, TestSuite};
 use crate::workspace::{Workspace, invocation_directory};
 
+/// Parsed workflow command line.
 #[derive(Debug, Parser)]
 #[command(name = "workflow", version, about = "kokjinsam/just workflow runtime")]
 pub struct Cli {
+    /// Report output format.
     #[arg(long, value_enum, default_value_t, global = true)]
     pub output: OutputFormat,
 
+    /// Requested workflow command.
     #[command(subcommand)]
     pub command: FoundationCommand,
 }
 
+/// Supported report output formats.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
 pub enum OutputFormat {
+    /// Human-readable diagnostics.
     #[default]
     Human,
+    /// Machine-readable JSON.
     Json,
 }
 
+/// Top-level workflow commands.
 #[derive(Debug, Subcommand)]
 pub enum FoundationCommand {
+    /// Format selected resources.
     Format(SelectorArgs),
+    /// Lint selected resources.
     Lint(SelectorArgs),
+    /// Type-check selected resources.
     Typecheck(SelectorArgs),
+    /// Compile selected resources.
     Compile(SelectorArgs),
+    /// Check specifications.
     Spec(SpecArgs),
+    /// Run target or application tests.
     Test(TestArgs),
+    /// Measure target coverage.
     Coverage(SelectorArgs),
+    /// Run the aggregate verification command.
     Verify,
+    /// Inspect provider readiness.
     Doctor,
 }
 
+/// Positional selectors shared by scoped commands.
 #[derive(Debug, Args)]
 pub struct SelectorArgs {
+    /// Repository, target, component, or path selectors.
     #[arg(value_name = "SELECTOR")]
     pub selectors: Vec<String>,
 }
 
+/// Arguments for the test command.
 #[derive(Debug, Args)]
 pub struct TestArgs {
+    /// Optional suite followed by selectors.
     #[arg(value_name = "SUITE_OR_SELECTOR")]
     pub arguments: Vec<String>,
 
+    /// Provider arguments after `--`.
     #[arg(last = true, value_name = "ARG")]
     pub passthrough: Vec<OsString>,
 }
 
+/// Arguments for specification checks.
 #[derive(Debug, Args)]
 pub struct SpecArgs {
+    /// Optional specification kind.
     #[arg(value_enum, value_name = "KIND")]
     pub kind: Option<specification::SpecificationKind>,
 
+    /// Kind-specific names or paths.
     #[arg(value_name = "NAME_OR_PATH")]
     pub selections: Vec<String>,
 }
 
 impl FoundationCommand {
+    /// Returns the stable command name.
     #[must_use]
     pub const fn name(&self) -> &'static str {
         match self {
@@ -89,6 +116,7 @@ impl FoundationCommand {
         }
     }
 
+    /// Returns selectors carried by this command.
     #[must_use]
     pub fn selectors(&self) -> &[String] {
         match self {
@@ -104,6 +132,10 @@ impl FoundationCommand {
     }
 }
 
+/// Runs a parsed command using the process environment.
+///
+/// Returns the stable process exit code.
+#[must_use]
 pub fn run_from_environment(cli: &Cli) -> u8 {
     let current = match env::current_dir() {
         Ok(current) => current,
@@ -118,6 +150,15 @@ pub fn run_from_environment(cli: &Cli) -> u8 {
     run(cli, &current, caller.as_deref())
 }
 
+/// Runs a parsed command from an explicit directory context.
+///
+/// Returns the stable process exit code.
+#[must_use]
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI boundary intentionally renders the final unavailable report"
+)]
 pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
     let invocation = match invocation_directory(current, caller) {
         Ok(invocation) => invocation,
@@ -323,29 +364,7 @@ fn run_format(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::S
         Err(error) => return render_error(cli.output, &error),
     };
 
-    if !child_stdout.is_empty() {
-        eprint!("{child_stdout}");
-    }
-    if !child_stderr.is_empty() {
-        eprint!("{child_stderr}");
-    }
-    match cli.output {
-        OutputFormat::Human => eprint!("{}", render_human(&report)),
-        OutputFormat::Json => match render_json(&report) {
-            Ok(json) => println!("{json}"),
-            Err(error) => {
-                eprintln!("error: could not serialize report: {error}");
-                return EXIT_USAGE;
-            }
-        },
-    }
-
-    match report.status {
-        ReportStatus::Passed => EXIT_SUCCESS,
-        ReportStatus::Failed => EXIT_VERIFICATION_FAILED,
-        ReportStatus::Interrupted => EXIT_INTERRUPTED,
-        ReportStatus::Error | ReportStatus::Unavailable => EXIT_USAGE,
-    }
+    render_completed(cli.output, &report, &child_stdout, &child_stderr)
 }
 
 fn run_lint(cli: &Cli, workspace: &Workspace, selections: &[crate::selector::Selection]) -> u8 {
@@ -396,6 +415,11 @@ fn run_doctor(cli: &Cli, workspace: &Workspace) -> u8 {
     render_completed(cli.output, &report, "", "")
 }
 
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "the CLI boundary intentionally renders reports and child diagnostics"
+)]
 fn render_completed(
     output: OutputFormat,
     report: &Report,
@@ -426,6 +450,10 @@ fn render_completed(
     }
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI boundary intentionally renders errors on standard error"
+)]
 fn render_error(output: OutputFormat, error: &WorkflowError) -> u8 {
     match output {
         OutputFormat::Human => eprintln!("error: {error}"),

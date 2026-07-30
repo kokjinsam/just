@@ -1,5 +1,5 @@
 just 1.54.0
-rust 1.93.0
+rust 1.97.1
 shellcheck 0.11.0
 shellspec 0.28.1
 shfmt 3.13.1

@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for CLI dispatch and output contracts.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

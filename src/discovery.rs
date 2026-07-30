@@ -1,3 +1,5 @@
+//! Git-aware discovery of workflow resources.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,24 +12,42 @@ use crate::ownership::{Owner, Ownership, SystemResource};
 use crate::selector::Selection;
 use crate::workspace::Workspace;
 
+/// Kind of discovered workflow evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
+    /// An Elixir Mix manifest.
     MixManifest,
+    /// A Node package manifest.
     NodeManifest,
+    /// A Cargo manifest.
     CargoManifest,
+    /// Provider configuration.
     Configuration,
+    /// A specification model or document.
     Specification,
+    /// An application-test resource.
     ApplicationTest,
+    /// A directly selected source file.
     SelectedFile,
 }
 
+/// A discovered path with its kind and owner.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiscoveredResource {
+    /// Canonical resource path.
     pub path: PathBuf,
+    /// Resource kind.
     pub kind: ResourceKind,
+    /// Most specific configured owner.
     pub owner: Owner,
 }
 
+/// Discovers resources admitted by `selections`.
+///
+/// # Errors
+///
+/// Returns an error when selected paths or traversed resources cannot be
+/// resolved and classified.
 pub fn discover_resources(
     workspace: &Workspace,
     selections: &[Selection],
@@ -198,7 +218,7 @@ fn discover_directory(
             continue;
         }
         if seen.insert(path.clone()) {
-            resources.push(DiscoveredResource { owner, path, kind });
+            resources.push(DiscoveredResource { path, kind, owner });
         }
     }
     Ok(())
@@ -252,8 +272,9 @@ fn classify(workspace: &Workspace, path: &Path) -> Option<ResourceKind> {
     normal_kind
 }
 
+/// Returns whether `owner` represents a repository-level resource.
 #[must_use]
-pub fn is_repository_resource(owner: &Owner) -> bool {
+pub const fn is_repository_resource(owner: &Owner) -> bool {
     matches!(
         owner,
         Owner::Repository(

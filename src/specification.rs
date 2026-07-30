@@ -1,3 +1,5 @@
+//! TLA+, Alloy, and OpenAPI specification planning and execution.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -19,10 +21,14 @@ use crate::workspace::Workspace;
 
 const TEMPORARY: &str = "<temporary>";
 
+/// Supported specification kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SpecificationKind {
+    /// TLA+ modules and model configurations.
     Tla,
+    /// Alloy models.
     Alloy,
+    /// OpenAPI documents.
     Openapi,
 }
 
@@ -35,7 +41,7 @@ enum SelectionProvenance {
 impl SpecificationKind {
     const ALL: [Self; 3] = [Self::Tla, Self::Alloy, Self::Openapi];
 
-    fn directory(self) -> &'static str {
+    const fn directory(self) -> &'static str {
         match self {
             Self::Tla => "tla",
             Self::Alloy => "alloy",
@@ -63,6 +69,12 @@ impl SpecificationKind {
     }
 }
 
+/// Builds a specification-check plan.
+///
+/// # Errors
+///
+/// Returns an error when kind-specific selections are invalid, ambiguous, or
+/// unsupported by discovered evidence.
 pub fn build_plan(
     workspace: &Workspace,
     kind: Option<SpecificationKind>,
@@ -88,7 +100,7 @@ pub fn build_plan(
     for selected_kind in kinds {
         let (files, provenance) = select_files(workspace, selected_kind, selections)?;
         match selected_kind {
-            SpecificationKind::Tla => build_tla_steps(workspace, files, provenance, &mut steps)?,
+            SpecificationKind::Tla => build_tla_steps(workspace, &files, provenance, &mut steps)?,
             SpecificationKind::Alloy => build_alloy_steps(workspace, files, &mut steps),
             SpecificationKind::Openapi => build_openapi_steps(workspace, files, &mut steps),
         }
@@ -125,97 +137,7 @@ fn select_files(
     let all = all_files(&root)?;
     let mut selected = BTreeSet::new();
     for selection in selections {
-        let path = PathBuf::from(selection);
-        if path.is_absolute()
-            || path.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
-                )
-            })
-        {
-            return Err(WorkflowError::Selector(format!(
-                "spec selection '{selection}' must be relative and cannot escape system.specs"
-            )));
-        }
-        let mut components = path.components();
-        let is_bare_name = matches!(
-            (components.next(), components.next()),
-            (Some(std::path::Component::Normal(_)), None)
-        );
-        let direct_candidates = [
-            workspace.invocation.join(&path),
-            workspace.config.system.specs.join(&path),
-            root.join(&path),
-        ];
-        let mut direct = direct_candidates
-            .iter()
-            .filter(|candidate| candidate.exists())
-            .filter_map(|candidate| fs::canonicalize(candidate).ok())
-            .collect::<BTreeSet<_>>();
-        if is_bare_name {
-            direct.retain(|candidate| {
-                candidate.starts_with(&root) && (candidate.is_dir() || kind.accepts(candidate))
-            });
-        } else {
-            direct.retain(|candidate| candidate.starts_with(&workspace.config.system.specs));
-        }
-
-        let mut matches = if direct.is_empty() {
-            if !is_bare_name {
-                return Err(WorkflowError::Selector(format!(
-                    "unknown {} specification selection '{selection}'",
-                    kind.directory()
-                )));
-            }
-            all.iter()
-                .filter(|candidate| kind.accepts(candidate))
-                .filter(|candidate| {
-                    candidate.file_name() == path.file_name()
-                        || candidate.file_stem() == path.file_name()
-                })
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        } else {
-            direct
-        };
-        if kind == SpecificationKind::Tla && matches.len() == 2 {
-            let module = matches
-                .iter()
-                .find(|candidate| {
-                    candidate
-                        .extension()
-                        .is_some_and(|extension| extension == "tla")
-                })
-                .cloned();
-            if module
-                .as_ref()
-                .is_some_and(|module| matches.contains(&module.with_extension("cfg")))
-            {
-                matches = [module.expect("checked above")].into_iter().collect();
-            }
-        }
-        if matches.is_empty() {
-            return Err(WorkflowError::Selector(format!(
-                "unknown {} specification selection '{selection}'",
-                kind.directory()
-            )));
-        }
-        if matches.len() > 1 {
-            return Err(WorkflowError::Selector(format!(
-                "ambiguous {} specification selection '{selection}'",
-                kind.directory()
-            )));
-        }
-        let candidate = matches.into_iter().next().expect("one match");
-        if !candidate.starts_with(&root) {
-            return Err(WorkflowError::Selector(format!(
-                "selection '{selection}' is not a {} specification",
-                kind.directory()
-            )));
-        }
+        let candidate = resolve_explicit_selection(workspace, &root, kind, &all, selection)?;
         if candidate.is_dir() {
             for file in all_files(&candidate)? {
                 if kind.accepts(&file) {
@@ -235,6 +157,100 @@ fn select_files(
         selected.into_iter().collect(),
         SelectionProvenance::Explicit,
     ))
+}
+
+fn resolve_explicit_selection(
+    workspace: &Workspace,
+    root: &Path,
+    kind: SpecificationKind,
+    all: &[PathBuf],
+    selection: &str,
+) -> Result<PathBuf, WorkflowError> {
+    let path = PathBuf::from(selection);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(WorkflowError::Selector(format!(
+            "spec selection '{selection}' must be relative and cannot escape system.specs"
+        )));
+    }
+    let mut components = path.components();
+    let is_bare_name = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    let direct_candidates = [
+        workspace.invocation.join(&path),
+        workspace.config.system.specs.join(&path),
+        root.join(&path),
+    ];
+    let mut matches = direct_candidates
+        .iter()
+        .filter(|candidate| candidate.exists())
+        .filter_map(|candidate| fs::canonicalize(candidate).ok())
+        .collect::<BTreeSet<_>>();
+    if is_bare_name {
+        matches.retain(|candidate| {
+            candidate.starts_with(root) && (candidate.is_dir() || kind.accepts(candidate))
+        });
+    } else {
+        matches.retain(|candidate| candidate.starts_with(&workspace.config.system.specs));
+    }
+    if matches.is_empty() && is_bare_name {
+        matches = all
+            .iter()
+            .filter(|candidate| kind.accepts(candidate))
+            .filter(|candidate| {
+                let requested_name = path.file_name();
+                candidate.file_name() == requested_name || candidate.file_stem() == requested_name
+            })
+            .cloned()
+            .collect();
+    }
+    if kind == SpecificationKind::Tla
+        && matches.len() == 2
+        && let Some(module) = matches
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .extension()
+                    .is_some_and(|extension| extension == "tla")
+            })
+            .filter(|module| matches.contains(&module.with_extension("cfg")))
+            .cloned()
+    {
+        matches = std::iter::once(module).collect();
+    }
+    let qualifier = kind.directory();
+    match matches.len() {
+        0 => Err(WorkflowError::Selector(format!(
+            "unknown {qualifier} specification selection '{selection}'"
+        ))),
+        1 => {
+            let candidate = matches.into_iter().next().ok_or_else(|| {
+                WorkflowError::Selector(format!(
+                    "unknown {qualifier} specification selection '{selection}'"
+                ))
+            })?;
+            if candidate.starts_with(root) {
+                Ok(candidate)
+            } else {
+                Err(WorkflowError::Selector(format!(
+                    "selection '{selection}' is not a {qualifier} specification"
+                )))
+            }
+        }
+        _ => Err(WorkflowError::Selector(format!(
+            "ambiguous {qualifier} specification selection '{selection}'"
+        ))),
+    }
 }
 
 fn discovered_files(
@@ -315,14 +331,14 @@ fn all_files(root: &Path) -> Result<Vec<PathBuf>, WorkflowError> {
 
 fn build_tla_steps(
     workspace: &Workspace,
-    files: Vec<PathBuf>,
+    files: &[PathBuf],
     provenance: SelectionProvenance,
     steps: &mut Vec<Step>,
 ) -> Result<(), WorkflowError> {
     let root = workspace.config.system.specs.join("tla");
     let selected = files.iter().cloned().collect::<BTreeSet<_>>();
     let mut modules = BTreeSet::new();
-    for file in &files {
+    for file in files {
         match file.extension().and_then(OsStr::to_str) {
             Some("tla") => {
                 modules.insert(file.clone());
@@ -507,6 +523,12 @@ fn relative_argument(cwd: &Path, path: &Path) -> PathBuf {
     )
 }
 
+/// Executes a specification-check plan.
+///
+/// # Errors
+///
+/// Returns an error when preflight, provider execution, temporary-output
+/// cleanup, or reporting fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &Plan,
@@ -620,7 +642,7 @@ fn run(
     if let Some(temporary) = temporary {
         for argument in &mut argv {
             if argument == OsStr::new(TEMPORARY) {
-                *argument = temporary.path().as_os_str().to_owned();
+                temporary.path().as_os_str().clone_into(argument);
             } else if argument == OsStr::new(&format!("--out-dir={TEMPORARY}")) {
                 *argument =
                     OsString::from(format!("--out-dir={}", temporary.path().to_string_lossy()));
@@ -657,6 +679,13 @@ fn run(
     let stderr_reader = std::thread::spawn(move || read_output(stderr));
     loop {
         if interrupt.received() {
+            #[cfg_attr(
+                unix,
+                expect(
+                    clippy::unnecessary_mut_passed,
+                    reason = "the shared call must also compile with the mutable non-Unix helper"
+                )
+            )]
             terminate(&mut child).map_err(|error| {
                 WorkflowError::Planning(format!(
                     "could not stop interrupted spec tool '{}': {error}",
@@ -692,20 +721,12 @@ fn run(
 }
 
 #[cfg(unix)]
-fn terminate(child: &mut std::process::Child) -> std::io::Result<()> {
-    let process_group = i32::try_from(child.id())
-        .map_err(|error| std::io::Error::other(format!("invalid child process id: {error}")))?;
+fn terminate(child: &std::process::Child) -> std::io::Result<()> {
+    let process_group = rustix::process::Pid::from_child(child);
     // The child was created as its own process group, so this also stops launcher descendants.
-    let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
-        }
+    match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::from_raw_os_error(error.raw_os_error())),
     }
 }
 

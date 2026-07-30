@@ -1,4 +1,6 @@
+#![cfg(test)]
 #![cfg(unix)]
+//! Integration tests for application-test workflows.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -845,7 +847,8 @@ fn forced_cleanup_kills_the_owned_process_group_and_descendants() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    let alive = rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
     assert!(!alive, "Process Compose descendant {pid} survived cleanup");
     assert!(repository.path().join("captured.env").is_file());
 }
@@ -883,8 +886,11 @@ fn real_sigint_returns_130_after_environment_and_descendant_cleanup() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(provider_descendant.is_file());
-    let result = unsafe { libc::kill(i32::try_from(child.id()).unwrap(), libc::SIGINT) };
-    assert_eq!(result, 0);
+    let result = rustix::process::kill_process(
+        rustix::process::Pid::from_child(&child),
+        rustix::process::Signal::INT,
+    );
+    assert_eq!(result, Ok(()));
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(130));
     assert!(fs::read_to_string(&log).unwrap().contains("pc:down|"));
@@ -894,7 +900,8 @@ fn real_sigint_returns_130_after_environment_and_descendant_cleanup() {
             .parse::<i32>()
             .unwrap();
         assert!(
-            unsafe { libc::kill(pid, 0) } != 0,
+            rustix::process::Pid::from_raw(pid)
+                .is_none_or(|pid| rustix::process::test_kill_process(pid).is_err()),
             "descendant {pid} survived interruption"
         );
     }
@@ -903,11 +910,15 @@ fn real_sigint_returns_130_after_environment_and_descendant_cleanup() {
 fn assert_process_gone(path: &Path) {
     let pid = fs::read_to_string(path).unwrap().parse::<i32>().unwrap();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline && unsafe { libc::kill(pid, 0) } == 0 {
+    while Instant::now() < deadline
+        && rustix::process::Pid::from_raw(pid)
+            .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+    {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        unsafe { libc::kill(pid, 0) } != 0,
+        rustix::process::Pid::from_raw(pid)
+            .is_none_or(|pid| rustix::process::test_kill_process(pid).is_err()),
         "process {pid} from '{}' survived",
         path.display()
     );
@@ -976,8 +987,11 @@ fn sigint_during_hung_readiness_finalizes_and_reaps_all_groups() {
     }
     assert!(control_descendant.is_file());
     assert_eq!(
-        unsafe { libc::kill(i32::try_from(child.id()).unwrap(), libc::SIGINT) },
-        0
+        rustix::process::kill_process(
+            rustix::process::Pid::from_child(&child),
+            rustix::process::Signal::INT,
+        ),
+        Ok(())
     );
     let started = Instant::now();
     assert_eq!(child.wait().unwrap().code(), Some(130));

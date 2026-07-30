@@ -1,3 +1,5 @@
+//! Workspace discovery and invocation-directory resolution.
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -5,14 +7,24 @@ use std::path::{Path, PathBuf};
 use crate::config::WorkspaceConfig;
 use crate::error::WorkflowError;
 
+/// A loaded workflow workspace.
 #[derive(Debug)]
 pub struct Workspace {
+    /// Canonical repository root.
     pub root: PathBuf,
+    /// Canonical directory from which the workflow was invoked.
     pub invocation: PathBuf,
+    /// Validated workspace configuration.
     pub config: WorkspaceConfig,
 }
 
 impl Workspace {
+    /// Discovers and loads the workspace containing `invocation`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no workspace root can be found or its
+    /// configuration cannot be loaded.
     pub fn discover(invocation: &Path) -> Result<Self, WorkflowError> {
         let invocation = canonical_directory(invocation, "invocation directory")?;
         let root = invocation
@@ -35,6 +47,13 @@ impl Workspace {
     }
 }
 
+/// Resolves the effective invocation directory.
+///
+/// `caller` overrides `current` when supplied by the shell wrapper.
+///
+/// # Errors
+///
+/// Returns an error when the selected directory cannot be canonicalized.
 pub fn invocation_directory(
     current: &Path,
     caller: Option<&OsStr>,

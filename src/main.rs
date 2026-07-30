@@ -1,3 +1,5 @@
+//! Executable entry point for the workflow CLI.
+
 use std::process::ExitCode;
 
 use clap::Parser;

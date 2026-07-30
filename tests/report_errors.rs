@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for report rendering and exit-code mapping.
+
 use kokjinsam_just::error::{
     EXIT_INTERRUPTED, EXIT_SUCCESS, EXIT_USAGE, EXIT_VERIFICATION_FAILED, WorkflowError,
 };

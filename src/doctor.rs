@@ -1,3 +1,5 @@
+//! Read-only diagnostics for workflow structure and provider readiness.
+
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -27,281 +29,382 @@ struct Check {
     tla_jar: bool,
 }
 
+/// Inspects configuration and all applicable provider requirements.
+///
+/// # Errors
+///
+/// Returns an error when repository discovery or application-test inspection
+/// cannot complete.
 pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, WorkflowError> {
     let started = Instant::now();
     let resources = discover_resources(workspace, &[Selection::Repository])?;
-    let mut checks = Vec::new();
+    let checks = Vec::new();
     let configurations = resources
         .iter()
         .filter(|resource| resource.kind == ResourceKind::Configuration)
         .map(|resource| resource.path.clone())
         .collect::<Vec<_>>();
-    let mut findings = vec![step_report(
+    let findings = vec![step_report(
         workspace,
-        "configuration",
-        &Owner::Repository(SystemResource::Repository),
-        &workspace.root,
-        vec![workspace.root.join("just.yaml")],
-        vec![workspace.root.join("just.yaml")],
-        StepStatus::Passed,
-        None,
-        String::new(),
+        DoctorReport {
+            provider: "configuration",
+            owner: &Owner::Repository(SystemResource::Repository),
+            root: &workspace.root,
+            targets: vec![workspace.root.join("just.yaml")],
+            configuration_files: vec![workspace.root.join("just.yaml")],
+            status: StepStatus::Passed,
+            skip_reason: None,
+            stderr: String::new(),
+        },
     )];
+    collect_resource_diagnostics(
+        workspace,
+        started_at,
+        started,
+        &resources,
+        &configurations,
+        checks,
+        findings,
+    )
+}
 
-    for resource in &resources {
+fn collect_resource_diagnostics(
+    workspace: &Workspace,
+    started_at: String,
+    started: Instant,
+    resources: &[crate::discovery::DiscoveredResource],
+    configurations: &[PathBuf],
+    mut checks: Vec<Check>,
+    mut findings: Vec<StepReport>,
+) -> Result<Report, WorkflowError> {
+    for resource in resources {
         let root = resource
             .path
             .parent()
-            .unwrap_or(Path::new(""))
+            .unwrap_or_else(|| Path::new(""))
             .to_path_buf();
         match resource.kind {
             ResourceKind::MixManifest => {
-                findings.push(manifest_report(workspace, resource, "mix-manifest"));
-                checks.push(check(resource, "mix-format", "mix", Vec::new()));
-                checks.push(check(resource, "dialyzer", "mix", Vec::new()));
-                checks.push(check(resource, "mix-compile", "mix", Vec::new()));
-                if is_target_owner(&resource.owner) {
-                    checks.push(check(resource, "exunit", "mix", Vec::new()));
-                    match excoveralls_readiness(&resource.path) {
-                        ExCoverallsReadiness::Ready { .. } => {
-                            let coveralls = root.join("coveralls.json");
-                            let mut configuration_files = vec![workspace.root.join("just.yaml")];
-                            if coveralls.is_file() {
-                                configuration_files.push(coveralls);
-                            }
-                            checks.push(check(resource, "excoveralls", "mix", configuration_files));
-                        }
-                        ExCoverallsReadiness::Invalid(reason) => findings.push(
-                            failed_requirement_report(workspace, resource, "excoveralls", reason),
-                        ),
-                    }
-                }
-                for (file, provider) in [
-                    (".credo.exs", "credo"),
-                    (".sobelow-conf", "sobelow"),
-                    (".ex_dna.exs", "ex-dna"),
-                    (".reach.exs", "reach"),
-                ] {
-                    let evidence = root.join(file);
-                    if evidence.is_file() {
-                        checks.push(check(resource, provider, "mix", vec![evidence]));
-                    }
-                }
+                inspect_mix(workspace, resource, &root, &mut checks, &mut findings);
             }
             ResourceKind::NodeManifest => {
-                findings.push(manifest_report(workspace, resource, "node-manifest"));
-                let package = read_package(&resource.path)?;
-                let has = |name: &str| {
-                    ["devDependencies", "dependencies"].iter().any(|field| {
-                        package
-                            .get(field)
-                            .and_then(|dependencies| dependencies.get(name))
-                            .is_some()
-                    })
-                };
-                if has("oxfmt") {
-                    checks.push(check(resource, "oxfmt", "pnpm", Vec::new()));
-                }
-                if has("oxlint") {
-                    checks.push(check(
-                        resource,
-                        "oxlint",
-                        "pnpm",
-                        matching_configs(&root, &configurations, "oxlint.config."),
-                    ));
-                }
-                if has("stylelint") {
-                    let configs = matching_configs(&root, &configurations, "stylelint.config.");
-                    if !configs.is_empty() {
-                        checks.push(check(resource, "stylelint", "pnpm", configs));
-                    }
-                }
-                for (script, provider) in [
-                    ("typecheck", "package-typecheck"),
-                    ("build", "package-build"),
-                ] {
-                    if package
-                        .get("scripts")
-                        .and_then(|scripts| scripts.get(script))
-                        .is_some()
-                    {
-                        checks.push(check(resource, provider, "pnpm", Vec::new()));
-                    } else {
-                        findings.push(skipped_script_report(workspace, resource, provider, script));
-                    }
-                }
-                if is_target_owner(&resource.owner) {
-                    let has_test = package
-                        .get("scripts")
-                        .and_then(|scripts| scripts.get("test"))
-                        .is_some();
-                    if has_test {
-                        checks.push(check(resource, "package-test", "pnpm", Vec::new()));
-                        if has("vitest")
-                            && (has("@vitest/coverage-v8") || has("@vitest/coverage-istanbul"))
-                        {
-                            checks.push(check(
-                                resource,
-                                "vitest-coverage",
-                                "pnpm",
-                                vec![workspace.root.join("just.yaml")],
-                            ));
-                        } else {
-                            findings.push(failed_requirement_report(
-                                workspace,
-                                resource,
-                                "vitest-coverage",
-                                "missing Vitest or a supported Vitest coverage adapter".into(),
-                            ));
-                        }
-                    } else {
-                        findings.push(skipped_script_report(
-                            workspace,
-                            resource,
-                            "package-test",
-                            "test",
-                        ));
-                    }
-                }
+                inspect_node(
+                    workspace,
+                    resource,
+                    &root,
+                    configurations,
+                    &mut checks,
+                    &mut findings,
+                )?;
             }
             ResourceKind::CargoManifest => {
-                findings.push(manifest_report(workspace, resource, "cargo-manifest"));
-                checks.push(check_with_tools(
-                    resource,
-                    "rustfmt",
-                    &["cargo", "cargo-fmt"],
-                    Vec::new(),
-                ));
-                checks.push(check_with_tools(
-                    resource,
-                    "clippy",
-                    &["cargo", "cargo-clippy"],
-                    Vec::new(),
-                ));
-                checks.push(check(resource, "cargo-check", "cargo", Vec::new()));
-                if is_target_owner(&resource.owner) {
-                    checks.push(check_with_tools(
-                        resource,
-                        "nextest",
-                        &["cargo", "cargo-nextest"],
-                        Vec::new(),
-                    ));
-                    checks.push(check_with_tools(
-                        resource,
-                        "llvm-cov",
-                        &["cargo", "cargo-llvm-cov"],
-                        vec![workspace.root.join("just.yaml")],
-                    ));
-                }
+                inspect_cargo(workspace, resource, &mut checks, &mut findings);
             }
-            ResourceKind::Specification
-                if resource
-                    .path
-                    .extension()
-                    .is_some_and(|extension| extension == "tla") =>
-            {
-                checks.push(Check {
-                    provider: "tla-format".into(),
-                    owner: resource.owner.clone(),
-                    root,
-                    evidence: resource.path.clone(),
-                    configuration_files: Vec::new(),
-                    tools: vec![OsString::from("java")],
-                    tla_jar: true,
-                });
-                if resource
-                    .path
-                    .starts_with(workspace.config.system.specs.join("tla"))
-                {
-                    checks.push(Check {
-                        provider: "apalache".into(),
-                        owner: resource.owner.clone(),
-                        root: workspace.config.system.specs.join("tla"),
-                        evidence: resource.path.clone(),
-                        configuration_files: {
-                            let mut files = Vec::new();
-                            let cfg = resource.path.with_extension("cfg");
-                            if cfg.is_file() {
-                                files.push(cfg);
-                            }
-                            files.extend(specification_configurations(
-                                &resource.path,
-                                &workspace.config.system.specs.join("tla"),
-                                &[".apalache.cfg"],
-                            ));
-                            files
-                        },
-                        tools: vec![OsString::from("apalache-mc")],
-                        tla_jar: false,
-                    });
-                }
-            }
-            ResourceKind::Specification
-                if resource
-                    .path
-                    .starts_with(workspace.config.system.specs.join("alloy"))
-                    && resource
-                        .path
-                        .extension()
-                        .is_some_and(|extension| extension == "als") =>
-            {
-                checks.push(Check {
-                    provider: "alloy".into(),
-                    owner: resource.owner.clone(),
-                    root: workspace.config.system.specs.join("alloy"),
-                    evidence: resource.path.clone(),
-                    configuration_files: Vec::new(),
-                    tools: vec![OsString::from("alloy")],
-                    tla_jar: false,
-                });
-            }
-            ResourceKind::Specification
-                if resource
-                    .path
-                    .starts_with(workspace.config.system.specs.join("openapi"))
-                    && resource
-                        .path
-                        .file_name()
-                        .is_none_or(|name| name != "vacuum.conf.yaml")
-                    && matches!(
-                        resource
-                            .path
-                            .extension()
-                            .and_then(|extension| extension.to_str()),
-                        Some("yaml" | "yml" | "json")
-                    ) =>
-            {
-                let configurations = specification_configurations(
-                    &resource.path,
-                    &workspace.config.system.specs.join("openapi"),
-                    &["vacuum.conf.yaml"],
-                );
-                checks.push(Check {
-                    provider: "oasdiff".into(),
-                    owner: resource.owner.clone(),
-                    root: workspace.config.system.specs.join("openapi"),
-                    evidence: resource.path.clone(),
-                    configuration_files: Vec::new(),
-                    tools: vec![OsString::from("oasdiff")],
-                    tla_jar: false,
-                });
-                checks.push(Check {
-                    provider: "vacuum".into(),
-                    owner: resource.owner.clone(),
-                    root: workspace.config.system.specs.join("openapi"),
-                    evidence: resource.path.clone(),
-                    configuration_files: configurations,
-                    tools: vec![OsString::from("vacuum")],
-                    tla_jar: false,
-                });
+            ResourceKind::Specification => {
+                inspect_specification(workspace, resource, root, &mut checks);
             }
             ResourceKind::Configuration
-            | ResourceKind::Specification
             | ResourceKind::ApplicationTest
             | ResourceKind::SelectedFile => {}
         }
     }
+    Ok(finish_inspection(
+        workspace,
+        started_at,
+        started,
+        resources,
+        configurations,
+        checks,
+        findings,
+    ))
+}
 
+fn inspect_mix(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    root: &Path,
+    checks: &mut Vec<Check>,
+    findings: &mut Vec<StepReport>,
+) {
+    findings.push(manifest_report(workspace, resource, "mix-manifest"));
+    checks.push(check(resource, "mix-format", "mix", Vec::new()));
+    checks.push(check(resource, "dialyzer", "mix", Vec::new()));
+    checks.push(check(resource, "mix-compile", "mix", Vec::new()));
+    if is_target_owner(&resource.owner) {
+        checks.push(check(resource, "exunit", "mix", Vec::new()));
+        match excoveralls_readiness(&resource.path) {
+            ExCoverallsReadiness::Ready { .. } => {
+                let coveralls = root.join("coveralls.json");
+                let mut configuration_files = vec![workspace.root.join("just.yaml")];
+                if coveralls.is_file() {
+                    configuration_files.push(coveralls);
+                }
+                checks.push(check(resource, "excoveralls", "mix", configuration_files));
+            }
+            ExCoverallsReadiness::Invalid(reason) => findings.push(failed_requirement_report(
+                workspace,
+                resource,
+                "excoveralls",
+                reason,
+            )),
+        }
+    }
+    for (file, provider) in [
+        (".credo.exs", "credo"),
+        (".sobelow-conf", "sobelow"),
+        (".ex_dna.exs", "ex-dna"),
+        (".reach.exs", "reach"),
+    ] {
+        let evidence = root.join(file);
+        if evidence.is_file() {
+            checks.push(check(resource, provider, "mix", vec![evidence]));
+        }
+    }
+}
+
+fn inspect_cargo(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    checks: &mut Vec<Check>,
+    findings: &mut Vec<StepReport>,
+) {
+    findings.push(manifest_report(workspace, resource, "cargo-manifest"));
+    checks.push(check_with_tools(
+        resource,
+        "rustfmt",
+        &["cargo", "cargo-fmt"],
+        Vec::new(),
+    ));
+    checks.push(check_with_tools(
+        resource,
+        "clippy",
+        &["cargo", "cargo-clippy"],
+        Vec::new(),
+    ));
+    checks.push(check(resource, "cargo-check", "cargo", Vec::new()));
+    if is_target_owner(&resource.owner) {
+        checks.push(check_with_tools(
+            resource,
+            "nextest",
+            &["cargo", "cargo-nextest"],
+            Vec::new(),
+        ));
+        checks.push(check_with_tools(
+            resource,
+            "llvm-cov",
+            &["cargo", "cargo-llvm-cov"],
+            vec![workspace.root.join("just.yaml")],
+        ));
+    }
+}
+
+fn inspect_specification(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    root: PathBuf,
+    checks: &mut Vec<Check>,
+) {
+    let specs = &workspace.config.system.specs;
+    if resource
+        .path
+        .extension()
+        .is_some_and(|extension| extension == "tla")
+    {
+        checks.push(Check {
+            provider: "tla-format".into(),
+            owner: resource.owner.clone(),
+            root,
+            evidence: resource.path.clone(),
+            configuration_files: Vec::new(),
+            tools: vec![OsString::from("java")],
+            tla_jar: true,
+        });
+        let tla_root = specs.join("tla");
+        if resource.path.starts_with(&tla_root) {
+            let mut configuration_files = Vec::new();
+            let cfg = resource.path.with_extension("cfg");
+            if cfg.is_file() {
+                configuration_files.push(cfg);
+            }
+            configuration_files.extend(specification_configurations(
+                &resource.path,
+                &tla_root,
+                &[".apalache.cfg"],
+            ));
+            checks.push(Check {
+                provider: "apalache".into(),
+                owner: resource.owner.clone(),
+                root: tla_root,
+                evidence: resource.path.clone(),
+                configuration_files,
+                tools: vec![OsString::from("apalache-mc")],
+                tla_jar: false,
+            });
+        }
+        return;
+    }
+    let alloy_root = specs.join("alloy");
+    if resource.path.starts_with(&alloy_root)
+        && resource
+            .path
+            .extension()
+            .is_some_and(|extension| extension == "als")
+    {
+        checks.push(Check {
+            provider: "alloy".into(),
+            owner: resource.owner.clone(),
+            root: alloy_root,
+            evidence: resource.path.clone(),
+            configuration_files: Vec::new(),
+            tools: vec![OsString::from("alloy")],
+            tla_jar: false,
+        });
+        return;
+    }
+    inspect_openapi(workspace, resource, checks);
+}
+
+fn inspect_openapi(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    checks: &mut Vec<Check>,
+) {
+    let root = workspace.config.system.specs.join("openapi");
+    if !resource.path.starts_with(&root)
+        || resource
+            .path
+            .file_name()
+            .is_some_and(|name| name == "vacuum.conf.yaml")
+        || !matches!(
+            resource
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yaml" | "yml" | "json")
+        )
+    {
+        return;
+    }
+    let configurations = specification_configurations(&resource.path, &root, &["vacuum.conf.yaml"]);
+    for (provider, tool, configuration_files) in [
+        ("oasdiff", "oasdiff", Vec::new()),
+        ("vacuum", "vacuum", configurations),
+    ] {
+        checks.push(Check {
+            provider: provider.into(),
+            owner: resource.owner.clone(),
+            root: root.clone(),
+            evidence: resource.path.clone(),
+            configuration_files,
+            tools: vec![OsString::from(tool)],
+            tla_jar: false,
+        });
+    }
+}
+
+fn inspect_node(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    root: &Path,
+    configurations: &[PathBuf],
+    checks: &mut Vec<Check>,
+    findings: &mut Vec<StepReport>,
+) -> Result<(), WorkflowError> {
+    findings.push(manifest_report(workspace, resource, "node-manifest"));
+    let package = read_package(&resource.path)?;
+    let has = |name: &str| {
+        ["devDependencies", "dependencies"].iter().any(|field| {
+            package
+                .get(field)
+                .and_then(|dependencies| dependencies.get(name))
+                .is_some()
+        })
+    };
+    if has("oxfmt") {
+        checks.push(check(resource, "oxfmt", "pnpm", Vec::new()));
+    }
+    if has("oxlint") {
+        checks.push(check(
+            resource,
+            "oxlint",
+            "pnpm",
+            matching_configs(root, configurations, "oxlint.config."),
+        ));
+    }
+    if has("stylelint") {
+        let configs = matching_configs(root, configurations, "stylelint.config.");
+        if !configs.is_empty() {
+            checks.push(check(resource, "stylelint", "pnpm", configs));
+        }
+    }
+    for (script, provider) in [
+        ("typecheck", "package-typecheck"),
+        ("build", "package-build"),
+    ] {
+        if package
+            .get("scripts")
+            .and_then(|scripts| scripts.get(script))
+            .is_some()
+        {
+            checks.push(check(resource, provider, "pnpm", Vec::new()));
+        } else {
+            findings.push(skipped_script_report(workspace, resource, provider, script));
+        }
+    }
+    if is_target_owner(&resource.owner) {
+        inspect_node_tests(workspace, resource, &package, &has, checks, findings);
+    }
+    Ok(())
+}
+
+fn inspect_node_tests(
+    workspace: &Workspace,
+    resource: &crate::discovery::DiscoveredResource,
+    package: &serde_json::Value,
+    has: &impl Fn(&str) -> bool,
+    checks: &mut Vec<Check>,
+    findings: &mut Vec<StepReport>,
+) {
+    let has_test = package
+        .get("scripts")
+        .and_then(|scripts| scripts.get("test"))
+        .is_some();
+    if !has_test {
+        findings.push(skipped_script_report(
+            workspace,
+            resource,
+            "package-test",
+            "test",
+        ));
+        return;
+    }
+    checks.push(check(resource, "package-test", "pnpm", Vec::new()));
+    if has("vitest") && (has("@vitest/coverage-v8") || has("@vitest/coverage-istanbul")) {
+        checks.push(check(
+            resource,
+            "vitest-coverage",
+            "pnpm",
+            vec![workspace.root.join("just.yaml")],
+        ));
+    } else {
+        findings.push(failed_requirement_report(
+            workspace,
+            resource,
+            "vitest-coverage",
+            "missing Vitest or a supported Vitest coverage adapter".into(),
+        ));
+    }
+}
+
+fn finish_inspection(
+    workspace: &Workspace,
+    started_at: String,
+    started: Instant,
+    resources: &[crate::discovery::DiscoveredResource],
+    configurations: &[PathBuf],
+    mut checks: Vec<Check>,
+    findings: Vec<StepReport>,
+) -> Report {
     checks.sort_by(|left, right| {
         left.root
             .cmp(&right.root)
@@ -321,147 +424,8 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
             .into_iter()
             .map(|check| ready_report(workspace, check)),
     );
-    let cargo_manifests = resources
-        .iter()
-        .filter(|resource| resource.kind == ResourceKind::CargoManifest);
-    for manifest in cargo_manifests {
-        let root = manifest.path.parent().unwrap_or(Path::new(""));
-        let configs = configurations
-            .iter()
-            .filter(|path| path.parent() == Some(root))
-            .cloned()
-            .collect::<Vec<_>>();
-        reports.push(match dylint_declaration(&manifest.path, &configs) {
-            Ok(Some(mut declaration_files)) => {
-                if !declaration_files.contains(&manifest.path) {
-                    declaration_files.insert(0, manifest.path.clone());
-                }
-                ready_report(
-                    workspace,
-                    Check {
-                        provider: "dylint".into(),
-                        owner: manifest.owner.clone(),
-                        root: root.to_path_buf(),
-                        evidence: manifest.path.clone(),
-                        configuration_files: declaration_files,
-                        tools: vec![
-                            OsString::from("cargo"),
-                            OsString::from("cargo-dylint"),
-                            OsString::from("dylint-link"),
-                        ],
-                        tla_jar: false,
-                    },
-                )
-            }
-            Ok(None) => skipped_dylint_report(workspace, manifest),
-            Err(error) => failed_dylint_report(workspace, manifest, error.to_string()),
-        });
-    }
-    match application_testing::discover(workspace) {
-        Ok(application) if application.configured_suites().is_empty() => {
-            reports.push(step_report(
-                workspace,
-                "application-tests",
-                &Owner::Repository(SystemResource::ApplicationTests),
-                &workspace.config.system.tests,
-                Vec::new(),
-                Vec::new(),
-                StepStatus::Skipped,
-                Some("optional and not configured: no application-test suites were found".into()),
-                String::new(),
-            ));
-        }
-        Ok(application) => {
-            let owner = Owner::Repository(SystemResource::ApplicationTests);
-            reports.push(ready_report(
-                workspace,
-                Check {
-                    provider: "process-compose".into(),
-                    owner: owner.clone(),
-                    root: workspace.root.clone(),
-                    evidence: workspace.root.join("process-compose.yaml"),
-                    configuration_files: vec![workspace.root.join("process-compose.yaml")],
-                    tools: vec![OsString::from("process-compose")],
-                    tla_jar: false,
-                },
-            ));
-            if let Some(report) = reports
-                .iter_mut()
-                .find(|report| report.provider == "process-compose")
-            {
-                report.stderr =
-                    "structural evidence only; semantic dry-run validation occurs during application test execution"
-                        .into();
-            }
-            for suite in application.configured_suites() {
-                let (provider, tool, evidence, configuration_files) = match suite {
-                    ApplicationSuite::Contract => (
-                        "schemathesis",
-                        "uv",
-                        application.openapi_documents()[0].clone(),
-                        vec![
-                            workspace.config.system.tests.join("pyproject.toml"),
-                            workspace.config.system.tests.join("uv.lock"),
-                        ],
-                    ),
-                    ApplicationSuite::E2e => (
-                        "playwright-e2e",
-                        "pnpm",
-                        workspace.config.system.tests.join("e2e"),
-                        vec![
-                            workspace.config.system.tests.join("package.json"),
-                            workspace.config.system.tests.join("playwright.config.ts"),
-                        ],
-                    ),
-                    ApplicationSuite::Visual => (
-                        "playwright-visual",
-                        "pnpm",
-                        workspace.config.system.tests.join("visual"),
-                        vec![
-                            workspace.config.system.tests.join("package.json"),
-                            workspace.config.system.tests.join("playwright.config.ts"),
-                        ],
-                    ),
-                    ApplicationSuite::UiProperty => (
-                        "bombadil",
-                        "pnpm",
-                        workspace
-                            .config
-                            .system
-                            .tests
-                            .join("bombadil/specification.ts"),
-                        vec![workspace.config.system.tests.join("package.json")],
-                    ),
-                    ApplicationSuite::Application => {
-                        unreachable!("aggregate suite is not a configured leaf suite")
-                    }
-                };
-                reports.push(ready_report(
-                    workspace,
-                    Check {
-                        provider: provider.into(),
-                        owner: owner.clone(),
-                        root: workspace.config.system.tests.clone(),
-                        evidence,
-                        configuration_files,
-                        tools: vec![OsString::from(tool)],
-                        tla_jar: false,
-                    },
-                ));
-            }
-        }
-        Err(error) => reports.push(step_report(
-            workspace,
-            "application-tests",
-            &Owner::Repository(SystemResource::ApplicationTests),
-            &workspace.config.system.tests,
-            Vec::new(),
-            Vec::new(),
-            StepStatus::Failed,
-            None,
-            error.to_string(),
-        )),
-    }
+    reports.extend(dylint_reports(workspace, resources, configurations));
+    reports.extend(application_reports(workspace));
     reports.sort_by(|left, right| {
         left.cwd
             .cmp(&right.cwd)
@@ -475,7 +439,7 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
     } else {
         ReportStatus::Passed
     };
-    Ok(Report {
+    Report {
         schema_version: 1,
         command: "doctor".into(),
         selectors: Vec::new(),
@@ -483,6 +447,164 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
         duration: started.elapsed().as_millis() as u64,
         status,
         steps: reports,
+    }
+}
+
+fn dylint_reports(
+    workspace: &Workspace,
+    resources: &[crate::discovery::DiscoveredResource],
+    configurations: &[PathBuf],
+) -> Vec<StepReport> {
+    resources
+        .iter()
+        .filter(|resource| resource.kind == ResourceKind::CargoManifest)
+        .map(|manifest| {
+            let root = manifest.path.parent().unwrap_or_else(|| Path::new(""));
+            let configs = configurations
+                .iter()
+                .filter(|path| path.parent() == Some(root))
+                .cloned()
+                .collect::<Vec<_>>();
+            match dylint_declaration(&manifest.path, &configs) {
+                Ok(Some(mut declaration_files)) => {
+                    if !declaration_files.contains(&manifest.path) {
+                        declaration_files.insert(0, manifest.path.clone());
+                    }
+                    ready_report(
+                        workspace,
+                        Check {
+                            provider: "dylint".into(),
+                            owner: manifest.owner.clone(),
+                            root: root.to_path_buf(),
+                            evidence: manifest.path.clone(),
+                            configuration_files: declaration_files,
+                            tools: vec![
+                                OsString::from("cargo"),
+                                OsString::from("cargo-dylint"),
+                                OsString::from("dylint-link"),
+                            ],
+                            tla_jar: false,
+                        },
+                    )
+                }
+                Ok(None) => skipped_dylint_report(workspace, manifest),
+                Err(error) => failed_dylint_report(workspace, manifest, error.to_string()),
+            }
+        })
+        .collect()
+}
+
+fn application_reports(workspace: &Workspace) -> Vec<StepReport> {
+    let mut reports = Vec::new();
+    match application_testing::discover(workspace) {
+        Ok(application) if application.configured_suites().is_empty() => {
+            reports.push(step_report(
+                workspace,
+                DoctorReport {
+                    provider: "application-tests",
+                    owner: &Owner::Repository(SystemResource::ApplicationTests),
+                    root: &workspace.config.system.tests,
+                    targets: Vec::new(),
+                    configuration_files: Vec::new(),
+                    status: StepStatus::Skipped,
+                    skip_reason: Some(
+                        "optional and not configured: no application-test suites were found".into(),
+                    ),
+                    stderr: String::new(),
+                },
+            ));
+        }
+        Ok(application) => {
+            let owner = Owner::Repository(SystemResource::ApplicationTests);
+            let mut process_compose = ready_report(
+                workspace,
+                Check {
+                    provider: "process-compose".into(),
+                    owner: owner.clone(),
+                    root: workspace.root.clone(),
+                    evidence: workspace.root.join("process-compose.yaml"),
+                    configuration_files: vec![workspace.root.join("process-compose.yaml")],
+                    tools: vec![OsString::from("process-compose")],
+                    tla_jar: false,
+                },
+            );
+            process_compose.stderr =
+                "structural evidence only; semantic dry-run validation occurs during application test execution"
+                    .into();
+            reports.push(process_compose);
+            reports.extend(
+                application
+                    .configured_suites()
+                    .iter()
+                    .filter_map(|suite| application_check(workspace, &application, &owner, *suite))
+                    .map(|check| ready_report(workspace, check)),
+            );
+        }
+        Err(error) => reports.push(step_report(
+            workspace,
+            DoctorReport {
+                provider: "application-tests",
+                owner: &Owner::Repository(SystemResource::ApplicationTests),
+                root: &workspace.config.system.tests,
+                targets: Vec::new(),
+                configuration_files: Vec::new(),
+                status: StepStatus::Failed,
+                skip_reason: None,
+                stderr: error.to_string(),
+            },
+        )),
+    }
+    reports
+}
+
+fn application_check(
+    workspace: &Workspace,
+    application: &application_testing::ApplicationDiscovery,
+    owner: &Owner,
+    suite: ApplicationSuite,
+) -> Option<Check> {
+    let tests = &workspace.config.system.tests;
+    let (provider, tool, evidence, configuration_files) = match suite {
+        ApplicationSuite::Contract => (
+            "schemathesis",
+            "uv",
+            application.openapi_documents().first()?.clone(),
+            vec![tests.join("pyproject.toml"), tests.join("uv.lock")],
+        ),
+        ApplicationSuite::E2e => (
+            "playwright-e2e",
+            "pnpm",
+            tests.join("e2e"),
+            vec![
+                tests.join("package.json"),
+                tests.join("playwright.config.ts"),
+            ],
+        ),
+        ApplicationSuite::Visual => (
+            "playwright-visual",
+            "pnpm",
+            tests.join("visual"),
+            vec![
+                tests.join("package.json"),
+                tests.join("playwright.config.ts"),
+            ],
+        ),
+        ApplicationSuite::UiProperty => (
+            "bombadil",
+            "pnpm",
+            tests.join("bombadil/specification.ts"),
+            vec![tests.join("package.json")],
+        ),
+        ApplicationSuite::Application => return None,
+    };
+    Some(Check {
+        provider: provider.into(),
+        owner: owner.clone(),
+        root: tests.clone(),
+        evidence,
+        configuration_files,
+        tools: vec![OsString::from(tool)],
+        tla_jar: false,
     })
 }
 
@@ -505,7 +627,7 @@ fn specification_configurations(path: &Path, root: &Path, names: &[&str]) -> Vec
     Vec::new()
 }
 
-fn is_target_owner(owner: &Owner) -> bool {
+const fn is_target_owner(owner: &Owner) -> bool {
     matches!(owner, Owner::Target(_) | Owner::Component { .. })
 }
 
@@ -516,14 +638,16 @@ fn manifest_report(
 ) -> StepReport {
     step_report(
         workspace,
-        provider,
-        &resource.owner,
-        resource.path.parent().unwrap_or(Path::new("")),
-        vec![resource.path.clone()],
-        Vec::new(),
-        StepStatus::Passed,
-        None,
-        String::new(),
+        DoctorReport {
+            provider,
+            owner: &resource.owner,
+            root: resource.path.parent().unwrap_or_else(|| Path::new("")),
+            targets: vec![resource.path.clone()],
+            configuration_files: Vec::new(),
+            status: StepStatus::Passed,
+            skip_reason: None,
+            stderr: String::new(),
+        },
     )
 }
 
@@ -539,7 +663,7 @@ fn check(
         root: resource
             .path
             .parent()
-            .unwrap_or(Path::new(""))
+            .unwrap_or_else(|| Path::new(""))
             .to_path_buf(),
         evidence: resource.path.clone(),
         configuration_files,
@@ -560,7 +684,7 @@ fn check_with_tools(
         root: resource
             .path
             .parent()
-            .unwrap_or(Path::new(""))
+            .unwrap_or_else(|| Path::new(""))
             .to_path_buf(),
         evidence: resource.path.clone(),
         configuration_files,
@@ -622,18 +746,20 @@ fn ready_report(workspace: &Workspace, check: Check) -> StepReport {
     }
     step_report(
         workspace,
-        &check.provider,
-        &check.owner,
-        &check.root,
-        vec![check.evidence],
-        check.configuration_files,
-        if diagnostics.is_empty() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        DoctorReport {
+            provider: &check.provider,
+            owner: &check.owner,
+            root: &check.root,
+            targets: vec![check.evidence],
+            configuration_files: check.configuration_files,
+            status: if diagnostics.is_empty() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            skip_reason: None,
+            stderr: diagnostics.join("; "),
         },
-        None,
-        diagnostics.join("; "),
     )
 }
 
@@ -643,14 +769,18 @@ fn skipped_dylint_report(
 ) -> StepReport {
     step_report(
         workspace,
-        "dylint",
-        &manifest.owner,
-        manifest.path.parent().unwrap_or(Path::new("")),
-        vec![manifest.path.clone()],
-        Vec::new(),
-        StepStatus::Skipped,
-        Some("not applicable: workspace.metadata.dylint.libraries is not declared".into()),
-        String::new(),
+        DoctorReport {
+            provider: "dylint",
+            owner: &manifest.owner,
+            root: manifest.path.parent().unwrap_or_else(|| Path::new("")),
+            targets: vec![manifest.path.clone()],
+            configuration_files: Vec::new(),
+            status: StepStatus::Skipped,
+            skip_reason: Some(
+                "not applicable: workspace.metadata.dylint.libraries is not declared".into(),
+            ),
+            stderr: String::new(),
+        },
     )
 }
 
@@ -662,16 +792,18 @@ fn skipped_script_report(
 ) -> StepReport {
     step_report(
         workspace,
-        provider,
-        &manifest.owner,
-        manifest.path.parent().unwrap_or(Path::new("")),
-        vec![manifest.path.clone()],
-        Vec::new(),
-        StepStatus::Skipped,
-        Some(format!(
-            "not applicable: package.json scripts.{script} is not declared"
-        )),
-        String::new(),
+        DoctorReport {
+            provider,
+            owner: &manifest.owner,
+            root: manifest.path.parent().unwrap_or_else(|| Path::new("")),
+            targets: vec![manifest.path.clone()],
+            configuration_files: Vec::new(),
+            status: StepStatus::Skipped,
+            skip_reason: Some(format!(
+                "not applicable: package.json scripts.{script} is not declared"
+            )),
+            stderr: String::new(),
+        },
     )
 }
 
@@ -682,14 +814,16 @@ fn failed_dylint_report(
 ) -> StepReport {
     step_report(
         workspace,
-        "dylint",
-        &manifest.owner,
-        manifest.path.parent().unwrap_or(Path::new("")),
-        vec![manifest.path.clone()],
-        Vec::new(),
-        StepStatus::Failed,
-        None,
-        diagnostic,
+        DoctorReport {
+            provider: "dylint",
+            owner: &manifest.owner,
+            root: manifest.path.parent().unwrap_or_else(|| Path::new("")),
+            targets: vec![manifest.path.clone()],
+            configuration_files: Vec::new(),
+            status: StepStatus::Failed,
+            skip_reason: None,
+            stderr: diagnostic,
+        },
     )
 }
 
@@ -701,30 +835,32 @@ fn failed_requirement_report(
 ) -> StepReport {
     step_report(
         workspace,
-        provider,
-        &manifest.owner,
-        manifest.path.parent().unwrap_or(Path::new("")),
-        vec![manifest.path.clone()],
-        Vec::new(),
-        StepStatus::Failed,
-        None,
-        diagnostic,
+        DoctorReport {
+            provider,
+            owner: &manifest.owner,
+            root: manifest.path.parent().unwrap_or_else(|| Path::new("")),
+            targets: vec![manifest.path.clone()],
+            configuration_files: Vec::new(),
+            status: StepStatus::Failed,
+            skip_reason: None,
+            stderr: diagnostic,
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn step_report(
-    workspace: &Workspace,
-    provider: &str,
-    owner: &Owner,
-    root: &Path,
+struct DoctorReport<'a> {
+    provider: &'a str,
+    owner: &'a Owner,
+    root: &'a Path,
     targets: Vec<PathBuf>,
     configuration_files: Vec<PathBuf>,
     status: StepStatus,
     skip_reason: Option<String>,
     stderr: String,
-) -> StepReport {
-    let (target, component) = match owner {
+}
+
+fn step_report(workspace: &Workspace, report: DoctorReport<'_>) -> StepReport {
+    let (target, component) = match report.owner {
         Owner::Target(target) => (Some(target.clone()), None),
         Owner::Component { target, component } => (Some(target.clone()), component.clone()),
         Owner::Repository(_) => (None, None),
@@ -732,29 +868,33 @@ fn step_report(
     StepReport {
         id: format!(
             "doctor:{}:{}",
-            relative(workspace, root).display(),
-            provider
+            relative(workspace, report.root).display(),
+            report.provider
         ),
         capability: capability_name(Capability::DoctorCheck).into(),
-        provider: provider.into(),
+        provider: report.provider.into(),
         target,
         component,
-        cwd: relative(workspace, root).to_string_lossy().into_owned(),
+        cwd: relative(workspace, report.root)
+            .to_string_lossy()
+            .into_owned(),
         argv: Vec::new(),
-        configuration_files: configuration_files
+        configuration_files: report
+            .configuration_files
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
-        targets: targets
+        targets: report
+            .targets
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
-        status,
+        status: report.status,
         exit_code: None,
         duration: 0,
-        skip_reason,
+        skip_reason: report.skip_reason,
         stdout: String::new(),
-        stderr,
+        stderr: report.stderr,
     }
 }
 

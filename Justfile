@@ -24,11 +24,23 @@ format *args:
       fi
 
 lint:
-    @cargo clippy --all-targets --all-features -- -D warnings
+    @cargo clippy --all-targets --all-features
+    @cargo doc --all-features --no-deps
     @for file in {{ shell_files }}; do \
         bash -n "$file"; \
       done
     @shellcheck -x {{ shell_files }}
+
+dependency-policy:
+    @required="cargo-deny 0.20.2"; \
+      install="cargo install cargo-deny --version 0.20.2 --locked"; \
+      actual="$(cargo deny --version 2>/dev/null || true)"; \
+      if [[ "$actual" != "$required" ]]; then \
+        printf "%s is required (found: %s); install it with:\n  %s\n" \
+          "$required" "${actual:-unknown}" "$install" >&2; \
+        exit 1; \
+      fi; \
+      cargo deny --locked --all-features check
 
 test:
     @cargo test --all-targets
@@ -37,4 +49,5 @@ test:
 check:
     @just format --check
     @just lint
+    @just dependency-policy
     @just test

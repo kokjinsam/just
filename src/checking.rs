@@ -1,3 +1,5 @@
+//! Type-checking and compilation workflow planning and execution.
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,12 @@ use crate::workspace::Workspace;
 
 const NOT_APPLICABLE: &str = "not-applicable";
 
+/// Builds a type-checking or compilation plan.
+///
+/// # Errors
+///
+/// Returns an error when discovery, provider configuration, or plan validation
+/// fails.
 pub fn build_plan(
     workspace: &Workspace,
     selections: &[Selection],
@@ -139,7 +147,7 @@ fn selected_owner_roots(
                 resource
                     .path
                     .parent()
-                    .unwrap_or(Path::new(""))
+                    .unwrap_or_else(|| Path::new(""))
                     .to_path_buf(),
             )
         })
@@ -220,6 +228,11 @@ fn owner_key(owner: &Owner) -> String {
     }
 }
 
+/// Executes a type-checking or compilation plan.
+///
+/// # Errors
+///
+/// Returns an error when preflight, provider execution, or reporting fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &Plan,
@@ -330,16 +343,18 @@ fn skipped_report(workspace: &Workspace, step: &Step) -> StepReport {
     report_fields(
         workspace,
         step,
-        StepStatus::Skipped,
-        None,
-        0,
-        Vec::new(),
-        Some(format!(
-            "not applicable: selected owner has no {} provider",
-            capability_name(step.capability)
-        )),
-        String::new(),
-        String::new(),
+        ReportOutput {
+            status: StepStatus::Skipped,
+            exit_code: None,
+            duration: 0,
+            argv: Vec::new(),
+            skip_reason: Some(format!(
+                "not applicable: selected owner has no {} provider",
+                capability_name(step.capability)
+            )),
+            stdout: String::new(),
+            stderr: String::new(),
+        },
     )
 }
 
@@ -358,24 +373,23 @@ fn command_report(
     report_fields(
         workspace,
         step,
-        if output.status.success() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        ReportOutput {
+            status: if output.status.success() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            exit_code: output.status.code(),
+            duration,
+            argv,
+            skip_reason: None,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        output.status.code(),
-        duration,
-        argv,
-        None,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report_fields(
-    workspace: &Workspace,
-    step: &Step,
+struct ReportOutput {
     status: StepStatus,
     exit_code: Option<i32>,
     duration: u64,
@@ -383,7 +397,9 @@ fn report_fields(
     skip_reason: Option<String>,
     stdout: String,
     stderr: String,
-) -> StepReport {
+}
+
+fn report_fields(workspace: &Workspace, step: &Step, output: ReportOutput) -> StepReport {
     let (target, component) = match &step.owner {
         Owner::Target(target) => (Some(target.clone()), None),
         Owner::Component { target, component } => (Some(target.clone()), component.clone()),
@@ -398,19 +414,19 @@ fn report_fields(
         cwd: relative(workspace, &step.cwd)
             .to_string_lossy()
             .into_owned(),
-        argv,
+        argv: output.argv,
         configuration_files: step
             .configuration_files
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
         targets: Vec::new(),
-        status,
-        exit_code,
-        duration,
-        skip_reason,
-        stdout,
-        stderr,
+        status: output.status,
+        exit_code: output.exit_code,
+        duration: output.duration,
+        skip_reason: output.skip_reason,
+        stdout: output.stdout,
+        stderr: output.stderr,
     }
 }
 

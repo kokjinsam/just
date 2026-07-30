@@ -1,37 +1,57 @@
+//! Ownership classification for discovered workspace resources.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::WorkspaceConfig;
 use crate::error::WorkflowError;
 
+/// Repository-level resource categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemResource {
+    /// The repository as a whole.
     Repository,
+    /// The configured specification tree.
     Specifications,
+    /// The configured application-test tree.
     ApplicationTests,
 }
 
+/// The most specific configured owner of a resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Owner {
+    /// A repository-level system resource.
     Repository(SystemResource),
+    /// A configured target.
     Target(String),
+    /// A target component, including an implicit unnamed component.
     Component {
+        /// Target name.
         target: String,
+        /// Optional explicit component name.
         component: Option<String>,
     },
 }
 
+/// Resolves filesystem paths to configured owners.
 #[derive(Debug)]
 pub struct Ownership<'a> {
     config: &'a WorkspaceConfig,
 }
 
 impl<'a> Ownership<'a> {
+    /// Creates an ownership resolver for `config`.
     #[must_use]
     pub const fn new(config: &'a WorkspaceConfig) -> Self {
         Self { config }
     }
 
+    /// Returns the most specific owner of `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `path` cannot be resolved or lies outside the
+    /// configured repository.
     pub fn owner_of(&self, path: &Path) -> Result<Owner, WorkflowError> {
         let path = canonical_path(path)?;
         if !path.starts_with(&self.config.root) {

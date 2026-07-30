@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for lint workflows.
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};

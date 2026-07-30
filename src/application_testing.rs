@@ -1,3 +1,5 @@
+//! Application-test discovery, planning, lifecycle control, and reporting.
+
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -21,22 +23,30 @@ use crate::selector::Selection;
 use crate::target_testing::{self, TestMode};
 use crate::workspace::Workspace;
 
-const READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+const READINESS_TIMEOUT: Duration = Duration::from_mins(1);
 const CONTROL_WAIT: Duration = Duration::from_secs(2);
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Supported application-test suites.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ApplicationSuite {
+    /// OpenAPI contract tests.
     Contract,
+    /// End-to-end browser tests.
     E2e,
+    /// Visual regression tests.
     Visual,
+    /// UI property tests.
     UiProperty,
+    /// Aggregate application suite.
     Application,
 }
 
 impl ApplicationSuite {
+    /// Leaf suites included by the aggregate application suite.
     pub const SHORT: [Self; 4] = [Self::Contract, Self::E2e, Self::Visual, Self::UiProperty];
 
+    /// Parses a CLI suite name.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
@@ -49,6 +59,7 @@ impl ApplicationSuite {
         }
     }
 
+    /// Returns the stable CLI suite name.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -61,12 +72,14 @@ impl ApplicationSuite {
     }
 }
 
+/// Discovered application-test configuration and evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationDiscovery {
     configured: Vec<ApplicationSuite>,
     openapi_documents: Vec<PathBuf>,
 }
 
+/// Prepared application-test plan and run state.
 #[derive(Debug)]
 pub struct ApplicationPlan {
     plan: Plan,
@@ -76,11 +89,13 @@ pub struct ApplicationPlan {
 }
 
 impl ApplicationPlan {
+    /// Returns all preparation and suite steps.
     #[must_use]
     pub fn steps(&self) -> &[Step] {
         self.plan.steps()
     }
 
+    /// Returns the retained artifact directory.
     #[must_use]
     pub fn artifact_dir(&self) -> &Path {
         &self.state.artifact_dir
@@ -102,121 +117,36 @@ struct ApplicationRunState {
 }
 
 impl ApplicationDiscovery {
+    /// Returns configured leaf suites in deterministic order.
     #[must_use]
     pub fn configured_suites(&self) -> &[ApplicationSuite] {
         &self.configured
     }
 
+    /// Returns discovered OpenAPI documents.
     #[must_use]
     pub fn openapi_documents(&self) -> &[PathBuf] {
         &self.openapi_documents
     }
 
+    /// Returns whether `suite` is configured.
     #[must_use]
     pub fn is_configured(&self, suite: ApplicationSuite) -> bool {
         self.configured.contains(&suite)
     }
 }
 
+/// Discovers configured application-test suites and evidence.
+///
+/// # Errors
+///
+/// Returns an error when configured tests or specifications cannot be
+/// discovered or validated.
 pub fn discover(workspace: &Workspace) -> Result<ApplicationDiscovery, WorkflowError> {
-    let tests = &workspace.config.system.tests;
-    let specs = &workspace.config.system.specs;
     let visible = visible_files(workspace)?;
-    let visible_file = |path: &Path| {
-        fs::canonicalize(path)
-            .ok()
-            .is_some_and(|path| visible.contains(&path))
-    };
-
-    let openapi_root = specs.join("openapi");
-    let mut openapi_documents = visible
-        .iter()
-        .filter(|path| path.starts_with(&openapi_root))
-        .filter(|path| {
-            path.file_name()
-                .is_none_or(|name| name != "vacuum.conf.yaml")
-        })
-        .filter(|path| {
-            matches!(
-                path.extension().and_then(OsStr::to_str),
-                Some("yaml" | "yml" | "json")
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    openapi_documents.sort();
-
-    let pyproject = tests.join("pyproject.toml");
-    let uv_lock = tests.join("uv.lock");
-    let has_pyproject = visible_file(&pyproject);
-    let declares_schemathesis = has_pyproject && toml_declares(&pyproject, "schemathesis")?;
-    let has_uv_lock = visible_file(&uv_lock);
-    let contract_evidence =
-        !openapi_documents.is_empty() || has_pyproject || declares_schemathesis || has_uv_lock;
-    let contract_ready = !openapi_documents.is_empty() && declares_schemathesis && has_uv_lock;
-    reject_partial(
-        "contract",
-        contract_evidence,
-        contract_ready,
-        "requires visible OpenAPI documents, pyproject.toml declaring Schemathesis, and uv.lock",
-    )?;
-
-    let package_path = tests.join("package.json");
-    let package_visible = visible_file(&package_path);
-    let package = package_visible
-        .then(|| read_json(&package_path))
-        .transpose()?;
-    let playwright = package
-        .as_ref()
-        .and_then(|package| dependency(package, "@playwright/test"))
-        .is_some();
-    let config = tests.join("playwright.config.ts");
-    let config_visible = visible_file(&config);
-    let e2e_files = recognized_test_files(&visible, &tests.join("e2e"));
-    let visual_files = recognized_test_files(&visible, &tests.join("visual"));
-    let e2e_evidence = playwright || config_visible || !e2e_files.is_empty();
-    let e2e_ready = playwright && config_visible && !e2e_files.is_empty();
-    reject_partial(
-        "e2e",
-        e2e_evidence,
-        e2e_ready,
-        "requires @playwright/test, playwright.config.ts, and a recognized e2e test file",
-    )?;
-    let visual_evidence = playwright || config_visible || !visual_files.is_empty();
-    let visual_ready = playwright && config_visible && !visual_files.is_empty();
-    reject_partial(
-        "visual",
-        visual_evidence,
-        visual_ready,
-        "requires @playwright/test, playwright.config.ts, and a recognized visual test file",
-    )?;
-
-    let bombadil_version = package
-        .as_ref()
-        .and_then(|package| dependency(package, "@antithesishq/bombadil"));
-    let bombadil_spec = tests.join("bombadil/specification.ts");
-    let bombadil_spec_visible = visible_file(&bombadil_spec);
-    let bombadil_evidence = bombadil_version.is_some() || bombadil_spec_visible;
-    let bombadil_ready = bombadil_version.is_some_and(exact_version) && bombadil_spec_visible;
-    reject_partial(
-        "ui-property",
-        bombadil_evidence,
-        bombadil_ready,
-        "requires an exactly pinned @antithesishq/bombadil dependency and bombadil/specification.ts",
-    )?;
-
-    let process_compose = workspace.root.join("process-compose.yaml");
-    let process_compose_visible = visible_file(&process_compose);
-    let artifacts_ignored = ignored_by_repository(workspace, &tests.join("artifacts"))?;
-    let venv_ignored = ignored_by_repository(workspace, &tests.join(".venv"))?;
-    let shared_evidence = process_compose_visible || artifacts_ignored || venv_ignored;
-    let shared_ready = process_compose_visible && artifacts_ignored && venv_ignored;
-    reject_partial(
-        "application environment",
-        shared_evidence,
-        shared_ready,
-        "requires root process-compose.yaml and Git-ignore coverage for system.tests/artifacts/ and .venv/",
-    )?;
+    let (openapi_documents, contract_ready) = discover_contract(workspace, &visible)?;
+    let [e2e_ready, visual_ready, bombadil_ready] = discover_node_suites(workspace, &visible)?;
+    let shared_ready = shared_environment_ready(workspace, &visible)?;
 
     let mut configured = Vec::new();
     if contract_ready {
@@ -243,6 +173,124 @@ pub fn discover(workspace: &Workspace) -> Result<ApplicationDiscovery, WorkflowE
     })
 }
 
+fn visible_path(visible: &BTreeSet<PathBuf>, path: &Path) -> bool {
+    fs::canonicalize(path)
+        .ok()
+        .is_some_and(|path| visible.contains(&path))
+}
+
+fn discover_contract(
+    workspace: &Workspace,
+    visible: &BTreeSet<PathBuf>,
+) -> Result<(Vec<PathBuf>, bool), WorkflowError> {
+    let openapi_root = workspace.config.system.specs.join("openapi");
+    let mut documents = visible
+        .iter()
+        .filter(|path| path.starts_with(&openapi_root))
+        .filter(|path| {
+            path.file_name()
+                .is_none_or(|name| name != "vacuum.conf.yaml")
+        })
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(OsStr::to_str),
+                Some("yaml" | "yml" | "json")
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    documents.sort();
+    let tests = &workspace.config.system.tests;
+    let pyproject = tests.join("pyproject.toml");
+    let uv_lock = tests.join("uv.lock");
+    let has_pyproject = visible_path(visible, &pyproject);
+    let declares_schemathesis = has_pyproject && toml_declares(&pyproject, "schemathesis")?;
+    let has_uv_lock = visible_path(visible, &uv_lock);
+    let evidence = !documents.is_empty() || has_pyproject || declares_schemathesis || has_uv_lock;
+    let ready = !documents.is_empty() && declares_schemathesis && has_uv_lock;
+    reject_partial(
+        "contract",
+        evidence,
+        ready,
+        "requires visible OpenAPI documents, pyproject.toml declaring Schemathesis, and uv.lock",
+    )?;
+    Ok((documents, ready))
+}
+
+fn discover_node_suites(
+    workspace: &Workspace,
+    visible: &BTreeSet<PathBuf>,
+) -> Result<[bool; 3], WorkflowError> {
+    let tests = &workspace.config.system.tests;
+    let package_path = tests.join("package.json");
+    let package = visible_path(visible, &package_path)
+        .then(|| read_json(&package_path))
+        .transpose()?;
+    let playwright = package
+        .as_ref()
+        .and_then(|package| dependency(package, "@playwright/test"))
+        .is_some();
+    let config_visible = visible_path(visible, &tests.join("playwright.config.ts"));
+    let suite_ready = |suite: &str| {
+        let files = recognized_test_files(visible, &tests.join(suite));
+        (
+            playwright || config_visible || !files.is_empty(),
+            playwright && config_visible && !files.is_empty(),
+        )
+    };
+    let (e2e_evidence, e2e_ready) = suite_ready("e2e");
+    reject_partial(
+        "e2e",
+        e2e_evidence,
+        e2e_ready,
+        "requires @playwright/test, playwright.config.ts, and a recognized e2e test file",
+    )?;
+    let (visual_evidence, visual_ready) = suite_ready("visual");
+    reject_partial(
+        "visual",
+        visual_evidence,
+        visual_ready,
+        "requires @playwright/test, playwright.config.ts, and a recognized visual test file",
+    )?;
+    let bombadil_version = package
+        .as_ref()
+        .and_then(|package| dependency(package, "@antithesishq/bombadil"));
+    let bombadil_spec_visible = visible_path(visible, &tests.join("bombadil/specification.ts"));
+    let bombadil_ready = bombadil_version.is_some_and(exact_version) && bombadil_spec_visible;
+    reject_partial(
+        "ui-property",
+        bombadil_version.is_some() || bombadil_spec_visible,
+        bombadil_ready,
+        "requires an exactly pinned @antithesishq/bombadil dependency and bombadil/specification.ts",
+    )?;
+    Ok([e2e_ready, visual_ready, bombadil_ready])
+}
+
+fn shared_environment_ready(
+    workspace: &Workspace,
+    visible: &BTreeSet<PathBuf>,
+) -> Result<bool, WorkflowError> {
+    let tests = &workspace.config.system.tests;
+    let process_compose_visible =
+        visible_path(visible, &workspace.root.join("process-compose.yaml"));
+    let artifacts_ignored = ignored_by_repository(workspace, &tests.join("artifacts"))?;
+    let venv_ignored = ignored_by_repository(workspace, &tests.join(".venv"))?;
+    let ready = process_compose_visible && artifacts_ignored && venv_ignored;
+    reject_partial(
+        "application environment",
+        process_compose_visible || artifacts_ignored || venv_ignored,
+        ready,
+        "requires root process-compose.yaml and Git-ignore coverage for system.tests/artifacts/ and .venv/",
+    )?;
+    Ok(ready)
+}
+
+/// Builds an application-test plan.
+///
+/// # Errors
+///
+/// Returns an error when the requested suite, passthrough arguments,
+/// preparation steps, or provider configuration is invalid.
 pub fn build_plan(
     workspace: &Workspace,
     requested: ApplicationSuite,
@@ -291,7 +339,11 @@ pub fn build_plan(
                 }
                 ApplicationSuite::Application => false,
             })
-            .expect("one resolved application action has one provider");
+            .ok_or_else(|| {
+                WorkflowError::Planning(
+                    "resolved application passthrough action has no provider".into(),
+                )
+            })?;
         reject_owned_passthrough(suite, passthrough)?;
     }
 
@@ -313,6 +365,12 @@ pub fn build_plan(
     })
 }
 
+/// Executes an application plan without a target-test prerequisite.
+///
+/// # Errors
+///
+/// Returns an error when lifecycle setup, provider execution, cleanup, or
+/// reporting fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &mut ApplicationPlan,
@@ -322,6 +380,12 @@ pub fn execute_plan(
     execute_with_target(workspace, plan, None, selectors, started_at)
 }
 
+/// Executes an application plan after an optional target-test plan.
+///
+/// # Errors
+///
+/// Returns an error when target execution, application lifecycle control,
+/// provider execution, cleanup, or reporting fails.
 pub fn execute_with_target(
     workspace: &Workspace,
     plan: &mut ApplicationPlan,
@@ -336,22 +400,13 @@ pub fn execute_with_target(
     let mut aggregate_stdout = String::new();
     let mut aggregate_stderr = String::new();
 
-    let dry = process_compose_output(workspace, &plan.state, &["up", "--dry-run"])?;
-    append_output(&mut aggregate_stdout, &mut aggregate_stderr, &dry);
-    reports.push(lifecycle_report(
+    if !run_dry_run(
         workspace,
-        "application:environment:dry-run",
-        "process-compose-dry-run",
-        &dry,
-        &process_compose_argv(workspace, &plan.state, &["up", "--dry-run"]),
-        0,
-    ));
-    if !dry.status.success() {
-        reports.extend(skipped_application_reports(
-            workspace,
-            plan,
-            "Process Compose dry-run validation failed",
-        ));
+        plan,
+        &mut reports,
+        &mut aggregate_stdout,
+        &mut aggregate_stderr,
+    )? {
         return Ok(finish_report(
             reports,
             selectors,
@@ -363,18 +418,47 @@ pub fn execute_with_target(
         ));
     }
 
-    if let Some(target) = target {
-        let (target_report, stdout, stderr) = target_testing::execute_plan(
-            workspace,
-            target,
-            Vec::new(),
-            started_at.clone(),
-            TestMode::Test,
-        )?;
-        aggregate_stdout.push_str(&stdout);
-        aggregate_stderr.push_str(&stderr);
-        reports.extend(target_report.steps);
-        if target_report.status == ReportStatus::Interrupted || interrupt.received() {
+    if run_target_plan(
+        workspace,
+        target,
+        &interrupt,
+        &started_at,
+        &mut reports,
+        &mut aggregate_stdout,
+        &mut aggregate_stderr,
+    )? {
+        return Ok(finish_report(
+            reports,
+            selectors,
+            started_at,
+            started,
+            true,
+            aggregate_stdout,
+            aggregate_stderr,
+        ));
+    }
+
+    match run_preparation(
+        workspace,
+        plan,
+        &interrupt,
+        &mut reports,
+        &mut aggregate_stdout,
+        &mut aggregate_stderr,
+    )? {
+        PreparationStatus::Ready => {}
+        PreparationStatus::Failed => {
+            return Ok(finish_report(
+                reports,
+                selectors,
+                started_at,
+                started,
+                false,
+                aggregate_stdout,
+                aggregate_stderr,
+            ));
+        }
+        PreparationStatus::Interrupted => {
             return Ok(finish_report(
                 reports,
                 selectors,
@@ -387,125 +471,63 @@ pub fn execute_with_target(
         }
     }
 
-    let mut preparation_failed = false;
-    for step in &plan.plan.steps()[..plan.preparation_count] {
-        let step_started = Instant::now();
-        let output = run_owned(step, &interrupt, "application preparation")?;
-        append_output(&mut aggregate_stdout, &mut aggregate_stderr, &output);
-        write_provider_logs(&plan.state.artifact_dir, step.id.as_str(), &output)?;
-        reports.push(step_report(
-            workspace,
-            step,
-            &output,
-            step_started.elapsed().as_millis() as u64,
-        ));
-        preparation_failed |= !output.status.success();
-        if interrupt.received() || was_interrupted(&output) {
-            return Ok(finish_report(
-                reports,
-                selectors,
-                started_at,
-                started,
-                true,
-                aggregate_stdout,
-                aggregate_stderr,
-            ));
-        }
-    }
-    if preparation_failed {
-        reports.extend(skipped_suite_reports(
-            workspace,
-            plan,
-            "application preparation failed; environment and suites were skipped",
-        ));
-        return Ok(finish_report(
-            reports,
-            selectors,
-            started_at,
-            started,
-            false,
-            aggregate_stdout,
-            aggregate_stderr,
-        ));
-    }
+    run_environment(EnvironmentRun {
+        workspace,
+        plan,
+        interrupt: &interrupt,
+        selectors,
+        started_at,
+        started,
+        reports,
+        stdout: aggregate_stdout,
+        stderr: aggregate_stderr,
+    })
+}
 
+struct EnvironmentRun<'a> {
+    workspace: &'a Workspace,
+    plan: &'a mut ApplicationPlan,
+    interrupt: &'a InterruptGuard,
+    selectors: Vec<String>,
+    started_at: String,
+    started: Instant,
+    reports: Vec<StepReport>,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_environment(run: EnvironmentRun<'_>) -> Result<(Report, String, String), WorkflowError> {
+    let EnvironmentRun {
+        workspace,
+        plan,
+        interrupt,
+        selectors,
+        started_at,
+        started,
+        mut reports,
+        mut stdout,
+        mut stderr,
+    } = run;
     plan.state.reservations.take();
     let mut environment = ProcessCompose::start(workspace, &plan.state)?;
     reports.push(environment.started_report(workspace));
-    let suite_steps =
+    let steps =
         &plan.plan.steps()[plan.preparation_count..plan.preparation_count + plan.suite_count];
-    let mut suites_accounted_for = 0;
-    let operational = (|| -> Result<(), WorkflowError> {
-        let readiness = environment.wait_ready(workspace, &plan.state, &interrupt)?;
-        append_output(
-            &mut aggregate_stdout,
-            &mut aggregate_stderr,
-            &readiness.output,
-        );
-        reports.push(readiness.report);
-
-        if !readiness.ready {
-            reports.extend(suite_steps.iter().map(|step| {
-                skipped_step_report(
-                    workspace,
-                    step,
-                    "Process Compose environment did not become ready",
-                )
-            }));
-            suites_accounted_for = suite_steps.len();
-            return Ok(());
-        }
-
-        for (index, step) in suite_steps.iter().enumerate() {
-            if interrupt.received() {
-                break;
-            }
-            if !environment.healthy()? {
-                reports.push(environment_health_report(
-                    workspace,
-                    "Process Compose environment exited before all suites ran",
-                ));
-                reports.extend(suite_steps[index..].iter().map(|remaining| {
-                    skipped_step_report(
-                        workspace,
-                        remaining,
-                        "Process Compose environment exited before the suite ran",
-                    )
-                }));
-                suites_accounted_for = suite_steps.len();
-                break;
-            }
-            let step_started = Instant::now();
-            let output = run_owned(step, &interrupt, "application-test provider")?;
-            append_output(&mut aggregate_stdout, &mut aggregate_stderr, &output);
-            write_provider_logs(&plan.state.artifact_dir, step.id.as_str(), &output)?;
-            reports.push(step_report(
-                workspace,
-                step,
-                &output,
-                step_started.elapsed().as_millis() as u64,
-            ));
-            suites_accounted_for = index + 1;
-            if interrupt.received() || was_interrupted(&output) {
-                break;
-            }
-        }
-        if !interrupt.received()
-            && !environment.healthy()?
-            && !reports
-                .iter()
-                .any(|report| report.provider == "process-compose-health")
-        {
-            reports.push(environment_health_report(
-                workspace,
-                "Process Compose environment exited while suites were running",
-            ));
-        }
-        Ok(())
-    })();
+    let mut accounted_for = 0;
+    let operational = run_suites(&mut SuiteRun {
+        workspace,
+        state: &plan.state,
+        interrupt,
+        environment: &mut environment,
+        steps,
+        accounted_for: &mut accounted_for,
+        reports: &mut reports,
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    });
     if let Err(error) = operational {
         reports.push(controller_error_report(workspace, &error));
-        reports.extend(suite_steps[suites_accounted_for..].iter().map(|step| {
+        reports.extend(steps[accounted_for..].iter().map(|step| {
             skipped_step_report(
                 workspace,
                 step,
@@ -513,7 +535,7 @@ pub fn execute_with_target(
             )
         }));
     } else if interrupt.received() {
-        reports.extend(suite_steps[suites_accounted_for..].iter().map(|step| {
+        reports.extend(steps[accounted_for..].iter().map(|step| {
             skipped_step_report(
                 workspace,
                 step,
@@ -522,12 +544,8 @@ pub fn execute_with_target(
         }));
     }
     reports.push(collection_report(workspace, &plan.state));
-    let cleanup = environment.cleanup(workspace, &plan.state, &interrupt);
-    append_output(
-        &mut aggregate_stdout,
-        &mut aggregate_stderr,
-        &cleanup.output,
-    );
+    let cleanup = environment.cleanup(workspace, &plan.state, interrupt);
+    append_output(&mut stdout, &mut stderr, &cleanup.output);
     reports.push(cleanup.report);
     Ok(finish_report(
         reports,
@@ -535,9 +553,186 @@ pub fn execute_with_target(
         started_at,
         started,
         interrupt.received(),
-        aggregate_stdout,
-        aggregate_stderr,
+        stdout,
+        stderr,
     ))
+}
+
+struct SuiteRun<'a> {
+    workspace: &'a Workspace,
+    state: &'a ApplicationRunState,
+    interrupt: &'a InterruptGuard,
+    environment: &'a mut ProcessCompose,
+    steps: &'a [Step],
+    accounted_for: &'a mut usize,
+    reports: &'a mut Vec<StepReport>,
+    stdout: &'a mut String,
+    stderr: &'a mut String,
+}
+
+fn run_suites(run: &mut SuiteRun<'_>) -> Result<(), WorkflowError> {
+    let readiness = run
+        .environment
+        .wait_ready(run.workspace, run.state, run.interrupt)?;
+    append_output(run.stdout, run.stderr, &readiness.output);
+    run.reports.push(readiness.report);
+    if !readiness.ready {
+        run.reports.extend(run.steps.iter().map(|step| {
+            skipped_step_report(
+                run.workspace,
+                step,
+                "Process Compose environment did not become ready",
+            )
+        }));
+        *run.accounted_for = run.steps.len();
+        return Ok(());
+    }
+    for (index, step) in run.steps.iter().enumerate() {
+        if run.interrupt.received() {
+            break;
+        }
+        if !run.environment.healthy()? {
+            run.reports.push(environment_health_report(
+                run.workspace,
+                "Process Compose environment exited before all suites ran",
+            ));
+            run.reports
+                .extend(run.steps[index..].iter().map(|remaining| {
+                    skipped_step_report(
+                        run.workspace,
+                        remaining,
+                        "Process Compose environment exited before the suite ran",
+                    )
+                }));
+            *run.accounted_for = run.steps.len();
+            break;
+        }
+        let started = Instant::now();
+        let output = run_owned(step, run.interrupt, "application-test provider")?;
+        append_output(run.stdout, run.stderr, &output);
+        write_provider_logs(&run.state.artifact_dir, step.id.as_str(), &output)?;
+        run.reports.push(step_report(
+            run.workspace,
+            step,
+            &output,
+            started.elapsed().as_millis() as u64,
+        ));
+        *run.accounted_for = index + 1;
+        if run.interrupt.received() || was_interrupted(&output) {
+            break;
+        }
+    }
+    if !run.interrupt.received()
+        && !run.environment.healthy()?
+        && !run
+            .reports
+            .iter()
+            .any(|report| report.provider == "process-compose-health")
+    {
+        run.reports.push(environment_health_report(
+            run.workspace,
+            "Process Compose environment exited while suites were running",
+        ));
+    }
+    Ok(())
+}
+
+fn run_target_plan(
+    workspace: &Workspace,
+    target: Option<&Plan>,
+    interrupt: &InterruptGuard,
+    started_at: &str,
+    reports: &mut Vec<StepReport>,
+    stdout: &mut String,
+    stderr: &mut String,
+) -> Result<bool, WorkflowError> {
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    let (target_report, target_stdout, target_stderr) = target_testing::execute_plan(
+        workspace,
+        target,
+        Vec::new(),
+        started_at.to_owned(),
+        TestMode::Test,
+    )?;
+    stdout.push_str(&target_stdout);
+    stderr.push_str(&target_stderr);
+    let interrupted = target_report.status == ReportStatus::Interrupted || interrupt.received();
+    reports.extend(target_report.steps);
+    Ok(interrupted)
+}
+
+fn run_dry_run(
+    workspace: &Workspace,
+    plan: &ApplicationPlan,
+    reports: &mut Vec<StepReport>,
+    stdout: &mut String,
+    stderr: &mut String,
+) -> Result<bool, WorkflowError> {
+    let dry = process_compose_output(workspace, &plan.state, &["up", "--dry-run"])?;
+    append_output(stdout, stderr, &dry);
+    reports.push(lifecycle_report(
+        workspace,
+        "application:environment:dry-run",
+        "process-compose-dry-run",
+        &dry,
+        &process_compose_argv(workspace, &plan.state, &["up", "--dry-run"]),
+        0,
+    ));
+    if dry.status.success() {
+        Ok(true)
+    } else {
+        reports.extend(skipped_application_reports(
+            workspace,
+            plan,
+            "Process Compose dry-run validation failed",
+        ));
+        Ok(false)
+    }
+}
+
+enum PreparationStatus {
+    Ready,
+    Failed,
+    Interrupted,
+}
+
+fn run_preparation(
+    workspace: &Workspace,
+    plan: &ApplicationPlan,
+    interrupt: &InterruptGuard,
+    reports: &mut Vec<StepReport>,
+    stdout: &mut String,
+    stderr: &mut String,
+) -> Result<PreparationStatus, WorkflowError> {
+    let mut failed = false;
+    for step in &plan.plan.steps()[..plan.preparation_count] {
+        let started = Instant::now();
+        let output = run_owned(step, interrupt, "application preparation")?;
+        append_output(stdout, stderr, &output);
+        write_provider_logs(&plan.state.artifact_dir, step.id.as_str(), &output)?;
+        reports.push(step_report(
+            workspace,
+            step,
+            &output,
+            started.elapsed().as_millis() as u64,
+        ));
+        failed |= !output.status.success();
+        if interrupt.received() || was_interrupted(&output) {
+            return Ok(PreparationStatus::Interrupted);
+        }
+    }
+    if failed {
+        reports.extend(skipped_suite_reports(
+            workspace,
+            plan,
+            "application preparation failed; environment and suites were skipped",
+        ));
+        Ok(PreparationStatus::Failed)
+    } else {
+        Ok(PreparationStatus::Ready)
+    }
 }
 
 fn preparation_steps(workspace: &Workspace) -> Result<Vec<Step>, WorkflowError> {
@@ -582,58 +777,7 @@ fn suite_steps(
     for suite in suites {
         match suite {
             ApplicationSuite::Contract => {
-                for (index, document) in discovery.openapi_documents.iter().enumerate() {
-                    let report_dir = state
-                        .artifact_dir
-                        .join("contract")
-                        .join(format!("{index:04}"));
-                    fs::create_dir_all(&report_dir).map_err(|error| {
-                        WorkflowError::Planning(format!(
-                            "cannot create Schemathesis report directory '{}': {error}",
-                            report_dir.display()
-                        ))
-                    })?;
-                    steps.push(Step {
-                        id: StepId::new(format!("application:contract:{index:04}")),
-                        label: format!("contract {}", relative(workspace, document).display()),
-                        capability: Capability::ApplicationTest,
-                        provider: ProviderId::new("schemathesis"),
-                        owner: owner.clone(),
-                        cwd: tests.clone(),
-                        program: OsString::from("uv"),
-                        argv: vec![
-                            "run".into(),
-                            "--locked".into(),
-                            "--".into(),
-                            "st".into(),
-                            "run".into(),
-                            document.as_os_str().to_owned(),
-                            "--url".into(),
-                            state.api_url().into(),
-                            "--workers".into(),
-                            "2".into(),
-                            "--phases".into(),
-                            "examples,coverage,fuzzing,stateful".into(),
-                            "--max-examples".into(),
-                            "20".into(),
-                            "--report".into(),
-                            "junit".into(),
-                            "--report-junit-path".into(),
-                            report_dir.join("junit.xml").into_os_string(),
-                            "--report".into(),
-                            "ndjson".into(),
-                            "--report-ndjson-path".into(),
-                            report_dir.join("events.ndjson").into_os_string(),
-                        ],
-                        env: state.environment(),
-                        targets: vec![document.clone()],
-                        configuration_files: vec![
-                            tests.join("pyproject.toml"),
-                            tests.join("uv.lock"),
-                        ],
-                        depends_on: Vec::new(),
-                    });
-                }
+                steps.extend(contract_steps(workspace, discovery, state, &owner)?);
             }
             ApplicationSuite::E2e | ApplicationSuite::Visual => {
                 let output = state.artifact_dir.join(suite.as_str()).join("output");
@@ -709,10 +853,77 @@ fn suite_steps(
                     depends_on: Vec::new(),
                 });
             }
-            ApplicationSuite::Application => unreachable!("aggregate suite was expanded"),
+            ApplicationSuite::Application => {
+                return Err(WorkflowError::Planning(
+                    "aggregate application suite was not expanded".into(),
+                ));
+            }
         }
     }
     Ok(steps)
+}
+
+fn contract_steps(
+    workspace: &Workspace,
+    discovery: &ApplicationDiscovery,
+    state: &ApplicationRunState,
+    owner: &Owner,
+) -> Result<Vec<Step>, WorkflowError> {
+    let tests = &workspace.config.system.tests;
+    discovery
+        .openapi_documents
+        .iter()
+        .enumerate()
+        .map(|(index, document)| {
+            let report_dir = state
+                .artifact_dir
+                .join("contract")
+                .join(format!("{index:04}"));
+            fs::create_dir_all(&report_dir).map_err(|error| {
+                WorkflowError::Planning(format!(
+                    "cannot create Schemathesis report directory '{}': {error}",
+                    report_dir.display()
+                ))
+            })?;
+            Ok(Step {
+                id: StepId::new(format!("application:contract:{index:04}")),
+                label: format!("contract {}", relative(workspace, document).display()),
+                capability: Capability::ApplicationTest,
+                provider: ProviderId::new("schemathesis"),
+                owner: owner.clone(),
+                cwd: tests.clone(),
+                program: OsString::from("uv"),
+                argv: vec![
+                    "run".into(),
+                    "--locked".into(),
+                    "--".into(),
+                    "st".into(),
+                    "run".into(),
+                    document.as_os_str().to_owned(),
+                    "--url".into(),
+                    state.api_url().into(),
+                    "--workers".into(),
+                    "2".into(),
+                    "--phases".into(),
+                    "examples,coverage,fuzzing,stateful".into(),
+                    "--max-examples".into(),
+                    "20".into(),
+                    "--report".into(),
+                    "junit".into(),
+                    "--report-junit-path".into(),
+                    report_dir.join("junit.xml").into_os_string(),
+                    "--report".into(),
+                    "ndjson".into(),
+                    "--report-ndjson-path".into(),
+                    report_dir.join("events.ndjson").into_os_string(),
+                ],
+                env: state.environment(),
+                targets: vec![document.clone()],
+                configuration_files: vec![tests.join("pyproject.toml"), tests.join("uv.lock")],
+                depends_on: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 impl ApplicationRunState {
@@ -751,9 +962,18 @@ impl ApplicationRunState {
             reserve_port("web")?,
             reserve_port("PostgreSQL")?,
         ];
-        let api_port = reservations[0].local_addr().map_err(port_error)?.port();
-        let web_port = reservations[1].local_addr().map_err(port_error)?.port();
-        let postgres_port = reservations[2].local_addr().map_err(port_error)?.port();
+        let api_port = reservations[0]
+            .local_addr()
+            .map_err(|error| port_error(&error))?
+            .port();
+        let web_port = reservations[1]
+            .local_addr()
+            .map_err(|error| port_error(&error))?
+            .port();
+        let postgres_port = reservations[2]
+            .local_addr()
+            .map_err(|error| port_error(&error))?
+            .port();
         Ok(Self {
             run_id,
             project,
@@ -885,7 +1105,7 @@ fn reserve_port(label: &str) -> Result<TcpListener, WorkflowError> {
     })
 }
 
-fn port_error(error: std::io::Error) -> WorkflowError {
+fn port_error(error: &std::io::Error) -> WorkflowError {
     WorkflowError::Planning(format!(
         "cannot inspect reserved application-test port: {error}"
     ))
@@ -1078,25 +1298,19 @@ fn process_compose_control(
             "could not execute Process Compose control: {error}"
         ))
     })?;
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = terminate_group(&mut child, libc::SIGKILL);
-            let _ = child.wait();
-            return Err(WorkflowError::Planning(
-                "Process Compose control stdout was not captured".into(),
-            ));
-        }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = terminate_group(&mut child, KILL_SIGNAL);
+        let _ = child.wait();
+        return Err(WorkflowError::Planning(
+            "Process Compose control stdout was not captured".into(),
+        ));
     };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            let _ = terminate_group(&mut child, libc::SIGKILL);
-            let _ = child.wait();
-            return Err(WorkflowError::Planning(
-                "Process Compose control stderr was not captured".into(),
-            ));
-        }
+    let Some(stderr) = child.stderr.take() else {
+        let _ = terminate_group(&mut child, KILL_SIGNAL);
+        let _ = child.wait();
+        return Err(WorkflowError::Planning(
+            "Process Compose control stderr was not captured".into(),
+        ));
     };
     let stdout_reader = std::thread::spawn(move || read_all(stdout));
     let stderr_reader = std::thread::spawn(move || read_all(stderr));
@@ -1107,7 +1321,7 @@ fn process_compose_control(
             Ok(Some(status)) => break Ok(status),
             Ok(None) if interrupt.received() && started.elapsed() >= Duration::from_millis(50) => {
                 stopped_reason = Some("Process Compose control interrupted");
-                let termination = terminate_group(&mut child, libc::SIGKILL);
+                let termination = terminate_group(&mut child, KILL_SIGNAL);
                 let waited = child.wait().map_err(|error| {
                     WorkflowError::Planning(format!(
                         "could not reap interrupted Process Compose control: {error}"
@@ -1120,7 +1334,7 @@ fn process_compose_control(
             }
             Ok(None) if Instant::now() >= deadline => {
                 stopped_reason = Some("Process Compose control deadline expired");
-                let termination = terminate_group(&mut child, libc::SIGKILL);
+                let termination = terminate_group(&mut child, KILL_SIGNAL);
                 let waited = child.wait().map_err(|error| {
                     WorkflowError::Planning(format!(
                         "could not reap timed out Process Compose control: {error}"
@@ -1133,7 +1347,7 @@ fn process_compose_control(
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(error) => {
-                let termination = terminate_group(&mut child, libc::SIGKILL);
+                let termination = terminate_group(&mut child, KILL_SIGNAL);
                 let waited = child.wait();
                 break Err(termination.err().unwrap_or_else(|| {
                     WorkflowError::Planning(format!(
@@ -1216,19 +1430,21 @@ impl ProcessCompose {
     fn started_report(&self, workspace: &Workspace) -> StepReport {
         raw_report(
             workspace,
-            "application:environment:start",
-            "application_test",
-            "process-compose",
-            &workspace.root,
-            argv_strings("process-compose", &self.argv),
-            vec![workspace.root.join("process-compose.yaml")],
-            Vec::new(),
-            StepStatus::Passed,
-            None,
-            self.started_at.elapsed().as_millis() as u64,
-            None,
-            String::new(),
-            String::new(),
+            RawReport {
+                id: "application:environment:start",
+                capability: "application_test",
+                provider: "process-compose",
+                cwd: &workspace.root,
+                argv: argv_strings("process-compose", &self.argv),
+                configuration_files: vec![workspace.root.join("process-compose.yaml")],
+                targets: Vec::new(),
+                status: StepStatus::Passed,
+                exit_code: None,
+                duration: self.started_at.elapsed().as_millis() as u64,
+                skip_reason: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
         )
     }
 
@@ -1286,23 +1502,25 @@ impl ProcessCompose {
         Ok(ReadinessOutcome {
             report: raw_report(
                 workspace,
-                "application:environment:readiness",
-                "application_test",
-                "process-compose-readiness",
-                &workspace.root,
-                argv_strings("process-compose", &argv),
-                vec![workspace.root.join("process-compose.yaml")],
-                Vec::new(),
-                if ready {
-                    StepStatus::Passed
-                } else {
-                    StepStatus::Failed
+                RawReport {
+                    id: "application:environment:readiness",
+                    capability: "application_test",
+                    provider: "process-compose-readiness",
+                    cwd: &workspace.root,
+                    argv: argv_strings("process-compose", &argv),
+                    configuration_files: vec![workspace.root.join("process-compose.yaml")],
+                    targets: Vec::new(),
+                    status: if ready {
+                        StepStatus::Passed
+                    } else {
+                        StepStatus::Failed
+                    },
+                    exit_code: last.status.code(),
+                    duration: started.elapsed().as_millis() as u64,
+                    skip_reason: None,
+                    stdout: String::from_utf8_lossy(&last.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&last.stderr).into_owned(),
                 },
-                last.status.code(),
-                started.elapsed().as_millis() as u64,
-                None,
-                String::from_utf8_lossy(&last.stdout).into_owned(),
-                String::from_utf8_lossy(&last.stderr).into_owned(),
             ),
             output: last,
             ready,
@@ -1331,61 +1549,41 @@ impl ProcessCompose {
             interrupt,
         )
         .unwrap_or_else(|error| synthetic_output(1, "", &error.to_string()));
-        let deadline = Instant::now() + CONTROL_WAIT;
         let mut cleanup_errors = Vec::new();
-        while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(error) => {
-                    cleanup_errors.push(format!("could not wait for Process Compose: {error}"));
-                    break;
-                }
-            }
-        }
-        let foreground_running = match self.child.try_wait() {
-            Ok(status) => status.is_none(),
-            Err(error) => {
-                cleanup_errors.push(format!(
-                    "could not inspect Process Compose cleanup: {error}"
-                ));
-                true
-            }
-        };
+        wait_for_child(
+            &mut self.child,
+            Instant::now() + CONTROL_WAIT,
+            "Process Compose",
+            &mut cleanup_errors,
+        );
+        let foreground_running = child_running(
+            &mut self.child,
+            "Process Compose cleanup",
+            &mut cleanup_errors,
+        );
         if foreground_running {
-            if let Err(error) = terminate_group(&mut self.child, libc::SIGTERM) {
+            if let Err(error) = terminate_group(&mut self.child, TERM_SIGNAL) {
                 cleanup_errors.push(error.to_string());
             }
-            let term_deadline = Instant::now() + Duration::from_millis(300);
-            while Instant::now() < term_deadline {
-                match self.child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                    Err(error) => {
-                        cleanup_errors.push(format!(
-                            "could not wait for Process Compose termination: {error}"
-                        ));
-                        break;
-                    }
-                }
-            }
-            let still_running = match self.child.try_wait() {
-                Ok(status) => status.is_none(),
-                Err(error) => {
-                    cleanup_errors.push(format!(
-                        "could not inspect Process Compose termination: {error}"
-                    ));
-                    true
-                }
-            };
-            if still_running && let Err(error) = terminate_group(&mut self.child, libc::SIGKILL) {
+            wait_for_child(
+                &mut self.child,
+                Instant::now() + Duration::from_millis(300),
+                "Process Compose termination",
+                &mut cleanup_errors,
+            );
+            let still_running = child_running(
+                &mut self.child,
+                "Process Compose termination",
+                &mut cleanup_errors,
+            );
+            if still_running && let Err(error) = terminate_group(&mut self.child, KILL_SIGNAL) {
                 cleanup_errors.push(error.to_string());
             }
             if let Err(error) = self.child.wait() {
                 cleanup_errors.push(format!("could not reap Process Compose: {error}"));
             }
         }
-        if let Err(error) = terminate_group(&mut self.child, libc::SIGKILL) {
+        if let Err(error) = terminate_group(&mut self.child, KILL_SIGNAL) {
             cleanup_errors.push(format!(
                 "could not terminate surviving Process Compose descendants: {error}"
             ));
@@ -1400,25 +1598,50 @@ impl ProcessCompose {
         LifecycleOutcome {
             report: raw_report(
                 workspace,
-                "application:environment:cleanup",
-                "application_test",
-                "process-compose-cleanup",
-                &workspace.root,
-                argv_strings("process-compose", &argv),
-                vec![workspace.root.join("process-compose.yaml")],
-                Vec::new(),
-                if cleanup_success {
-                    StepStatus::Passed
-                } else {
-                    StepStatus::Failed
+                RawReport {
+                    id: "application:environment:cleanup",
+                    capability: "application_test",
+                    provider: "process-compose-cleanup",
+                    cwd: &workspace.root,
+                    argv: argv_strings("process-compose", &argv),
+                    configuration_files: vec![workspace.root.join("process-compose.yaml")],
+                    targets: Vec::new(),
+                    status: if cleanup_success {
+                        StepStatus::Passed
+                    } else {
+                        StepStatus::Failed
+                    },
+                    exit_code: output.status.code(),
+                    duration: started.elapsed().as_millis() as u64,
+                    skip_reason: None,
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                 },
-                output.status.code(),
-                started.elapsed().as_millis() as u64,
-                None,
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
             ),
             output,
+        }
+    }
+}
+
+fn wait_for_child(child: &mut Child, deadline: Instant, label: &str, errors: &mut Vec<String>) {
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                errors.push(format!("could not wait for {label}: {error}"));
+                break;
+            }
+        }
+    }
+}
+
+fn child_running(child: &mut Child, label: &str, errors: &mut Vec<String>) -> bool {
+    match child.try_wait() {
+        Ok(status) => status.is_none(),
+        Err(error) => {
+            errors.push(format!("could not inspect {label}: {error}"));
+            true
         }
     }
 }
@@ -1426,7 +1649,7 @@ impl ProcessCompose {
 impl Drop for ProcessCompose {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
-            let _ = terminate_group(&mut self.child, libc::SIGKILL);
+            let _ = terminate_group(&mut self.child, KILL_SIGNAL);
             let _ = self.child.wait();
         }
     }
@@ -1467,7 +1690,7 @@ fn run_owned(
     let stderr_reader = std::thread::spawn(move || read_all(stderr));
     let status = loop {
         if interrupt.received() {
-            terminate_group(&mut child, libc::SIGKILL)?;
+            terminate_group(&mut child, KILL_SIGNAL)?;
             break child.wait().map_err(|error| {
                 WorkflowError::Planning(format!("could not wait for interrupted {label}: {error}"))
             })?;
@@ -1478,8 +1701,8 @@ fn run_owned(
             #[cfg(unix)]
             {
                 use std::os::unix::process::ExitStatusExt;
-                if status.signal() == Some(libc::SIGINT) {
-                    terminate_group(&mut child, libc::SIGKILL)?;
+                if status.signal() == Some(rustix::process::Signal::INT.as_raw()) {
+                    terminate_group(&mut child, KILL_SIGNAL)?;
                 }
             }
             break status;
@@ -1493,44 +1716,46 @@ fn run_owned(
     })
 }
 
-fn terminate_group(child: &mut Child, signal: i32) -> Result<(), WorkflowError> {
-    #[cfg(unix)]
-    {
-        let group = i32::try_from(child.id()).map_err(|error| {
-            WorkflowError::Planning(format!("invalid child process id: {error}"))
-        })?;
-        let result = unsafe { libc::kill(-group, signal) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                return Ok(());
-            }
-            if error.raw_os_error() == Some(libc::EPERM) {
-                return child.kill().or_else(|direct_error| {
-                    (direct_error.kind() == std::io::ErrorKind::InvalidInput)
-                        .then_some(())
-                        .ok_or(direct_error)
-                }).map_err(|direct_error| {
-                    WorkflowError::Planning(format!(
-                        "could not stop application child after process-group denial: {direct_error}"
-                    ))
-                });
-            }
-            {
-                return Err(WorkflowError::Planning(format!(
-                    "could not stop process group: {error}"
-                )));
-            }
-        }
-        Ok(())
+#[cfg(unix)]
+const KILL_SIGNAL: rustix::process::Signal = rustix::process::Signal::KILL;
+#[cfg(unix)]
+const TERM_SIGNAL: rustix::process::Signal = rustix::process::Signal::TERM;
+#[cfg(not(unix))]
+const KILL_SIGNAL: () = ();
+#[cfg(not(unix))]
+const TERM_SIGNAL: () = ();
+
+#[cfg(unix)]
+fn terminate_group(
+    child: &mut Child,
+    signal: rustix::process::Signal,
+) -> Result<(), WorkflowError> {
+    let group = rustix::process::Pid::from_child(child);
+    match rustix::process::kill_process_group(group, signal) {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(rustix::io::Errno::PERM) => child
+            .kill()
+            .or_else(|direct_error| {
+                (direct_error.kind() == std::io::ErrorKind::InvalidInput)
+                    .then_some(())
+                    .ok_or(direct_error)
+            })
+            .map_err(|direct_error| {
+                WorkflowError::Planning(format!(
+                    "could not stop application child after process-group denial: {direct_error}"
+                ))
+            }),
+        Err(error) => Err(WorkflowError::Planning(format!(
+            "could not stop process group: {error}"
+        ))),
     }
-    #[cfg(not(unix))]
-    {
-        let _ = signal;
-        child.kill().map_err(|error| {
-            WorkflowError::Planning(format!("could not stop application child: {error}"))
-        })
-    }
+}
+
+#[cfg(not(unix))]
+fn terminate_group(child: &mut Child, _signal: ()) -> Result<(), WorkflowError> {
+    child.kill().map_err(|error| {
+        WorkflowError::Planning(format!("could not stop application child: {error}"))
+    })
 }
 
 fn read_all(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
@@ -1562,18 +1787,11 @@ fn synthetic_output(code: i32, stdout: &str, stderr: &str) -> Output {
             stderr: stderr.as_bytes().to_vec(),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let status = Command::new(if code == 0 { "cmd" } else { "cmd" })
-            .args(if code == 0 {
-                ["/C", "exit", "0"]
-            } else {
-                ["/C", "exit", "1"]
-            })
-            .status()
-            .expect("platform command shell is available");
+        use std::os::windows::process::ExitStatusExt;
         Output {
-            status,
+            status: std::process::ExitStatus::from_raw(code.cast_unsigned()),
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
@@ -1604,42 +1822,46 @@ fn step_report(workspace: &Workspace, step: &Step, output: &Output, duration: u6
         .collect();
     raw_report(
         workspace,
-        step.id.as_str(),
-        capability_name(step.capability),
-        step.provider.as_str(),
-        &step.cwd,
-        argv,
-        step.configuration_files.clone(),
-        step.targets.clone(),
-        if output.status.success() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        RawReport {
+            id: step.id.as_str(),
+            capability: capability_name(step.capability),
+            provider: step.provider.as_str(),
+            cwd: &step.cwd,
+            argv,
+            configuration_files: step.configuration_files.clone(),
+            targets: step.targets.clone(),
+            status: if output.status.success() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            exit_code: output.status.code(),
+            duration,
+            skip_reason: None,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        output.status.code(),
-        duration,
-        None,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
 
 fn skipped_step_report(workspace: &Workspace, step: &Step, reason: &str) -> StepReport {
     raw_report(
         workspace,
-        step.id.as_str(),
-        capability_name(step.capability),
-        step.provider.as_str(),
-        &step.cwd,
-        Vec::new(),
-        step.configuration_files.clone(),
-        step.targets.clone(),
-        StepStatus::Skipped,
-        None,
-        0,
-        Some(reason.into()),
-        String::new(),
-        String::new(),
+        RawReport {
+            id: step.id.as_str(),
+            capability: capability_name(step.capability),
+            provider: step.provider.as_str(),
+            cwd: &step.cwd,
+            argv: Vec::new(),
+            configuration_files: step.configuration_files.clone(),
+            targets: step.targets.clone(),
+            status: StepStatus::Skipped,
+            exit_code: None,
+            duration: 0,
+            skip_reason: Some(reason.into()),
+            stdout: String::new(),
+            stderr: String::new(),
+        },
     )
 }
 
@@ -1676,90 +1898,96 @@ fn lifecycle_report(
 ) -> StepReport {
     raw_report(
         workspace,
-        id,
-        "application_test",
-        provider,
-        &workspace.root,
-        argv_strings("process-compose", argv),
-        vec![workspace.root.join("process-compose.yaml")],
-        Vec::new(),
-        if output.status.success() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        RawReport {
+            id,
+            capability: "application_test",
+            provider,
+            cwd: &workspace.root,
+            argv: argv_strings("process-compose", argv),
+            configuration_files: vec![workspace.root.join("process-compose.yaml")],
+            targets: Vec::new(),
+            status: if output.status.success() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            exit_code: output.status.code(),
+            duration,
+            skip_reason: None,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        output.status.code(),
-        duration,
-        None,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
     )
 }
 
 fn collection_report(workspace: &Workspace, state: &ApplicationRunState) -> StepReport {
     raw_report(
         workspace,
-        "application:artifacts:collection",
-        "application_test",
-        "artifact-collection",
-        &workspace.root,
-        Vec::new(),
-        Vec::new(),
-        vec![state.artifact_dir.clone()],
-        StepStatus::Passed,
-        None,
-        0,
-        None,
-        String::new(),
-        String::new(),
+        RawReport {
+            id: "application:artifacts:collection",
+            capability: "application_test",
+            provider: "artifact-collection",
+            cwd: &workspace.root,
+            argv: Vec::new(),
+            configuration_files: Vec::new(),
+            targets: vec![state.artifact_dir.clone()],
+            status: StepStatus::Passed,
+            exit_code: None,
+            duration: 0,
+            skip_reason: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
     )
 }
 
 fn environment_health_report(workspace: &Workspace, message: &str) -> StepReport {
     raw_report(
         workspace,
-        "application:environment:health",
-        "application_test",
-        "process-compose-health",
-        &workspace.root,
-        Vec::new(),
-        vec![workspace.root.join("process-compose.yaml")],
-        Vec::new(),
-        StepStatus::Failed,
-        None,
-        0,
-        None,
-        String::new(),
-        message.into(),
+        RawReport {
+            id: "application:environment:health",
+            capability: "application_test",
+            provider: "process-compose-health",
+            cwd: &workspace.root,
+            argv: Vec::new(),
+            configuration_files: vec![workspace.root.join("process-compose.yaml")],
+            targets: Vec::new(),
+            status: StepStatus::Failed,
+            exit_code: None,
+            duration: 0,
+            skip_reason: None,
+            stdout: String::new(),
+            stderr: message.into(),
+        },
     )
 }
 
 fn controller_error_report(workspace: &Workspace, error: &WorkflowError) -> StepReport {
     raw_report(
         workspace,
-        "application:controller",
-        "application_test",
-        "application-controller",
-        &workspace.root,
-        Vec::new(),
-        vec![workspace.root.join("process-compose.yaml")],
-        Vec::new(),
-        StepStatus::Failed,
-        None,
-        0,
-        None,
-        String::new(),
-        error.to_string(),
+        RawReport {
+            id: "application:controller",
+            capability: "application_test",
+            provider: "application-controller",
+            cwd: &workspace.root,
+            argv: Vec::new(),
+            configuration_files: vec![workspace.root.join("process-compose.yaml")],
+            targets: Vec::new(),
+            status: StepStatus::Failed,
+            exit_code: None,
+            duration: 0,
+            skip_reason: None,
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn raw_report(
-    workspace: &Workspace,
-    id: &str,
-    capability: &str,
-    provider: &str,
-    cwd: &Path,
+struct RawReport<'a> {
+    id: &'a str,
+    capability: &'a str,
+    provider: &'a str,
+    cwd: &'a Path,
     argv: Vec<String>,
     configuration_files: Vec<PathBuf>,
     targets: Vec<PathBuf>,
@@ -1769,29 +1997,35 @@ fn raw_report(
     skip_reason: Option<String>,
     stdout: String,
     stderr: String,
-) -> StepReport {
+}
+
+fn raw_report(workspace: &Workspace, report: RawReport<'_>) -> StepReport {
     StepReport {
-        id: id.into(),
-        capability: capability.into(),
-        provider: provider.into(),
+        id: report.id.into(),
+        capability: report.capability.into(),
+        provider: report.provider.into(),
         target: None,
         component: None,
-        cwd: relative(workspace, cwd).to_string_lossy().into_owned(),
-        argv,
-        configuration_files: configuration_files
+        cwd: relative(workspace, report.cwd)
+            .to_string_lossy()
+            .into_owned(),
+        argv: report.argv,
+        configuration_files: report
+            .configuration_files
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
-        targets: targets
+        targets: report
+            .targets
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
-        status,
-        exit_code,
-        duration,
-        skip_reason,
-        stdout,
-        stderr,
+        status: report.status,
+        exit_code: report.exit_code,
+        duration: report.duration,
+        skip_reason: report.skip_reason,
+        stdout: report.stdout,
+        stderr: report.stderr,
     }
 }
 
@@ -1838,10 +2072,9 @@ fn argv_strings(program: &str, argv: &[OsString]) -> Vec<String> {
         .collect()
 }
 
-fn capability_name(capability: Capability) -> &'static str {
+const fn capability_name(capability: Capability) -> &'static str {
     match capability {
         Capability::Compile => "compile",
-        Capability::ApplicationTest => "application_test",
         _ => "application_test",
     }
 }

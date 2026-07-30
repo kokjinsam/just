@@ -1,3 +1,5 @@
+//! Parsing and resolution of workflow selectors.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -5,14 +7,29 @@ use std::path::PathBuf;
 use crate::error::WorkflowError;
 use crate::workspace::Workspace;
 
+/// A resolved workflow selection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Selection {
+    /// The entire repository.
     Repository,
+    /// A configured target.
     Target(String),
-    Component { target: String, component: String },
+    /// A configured component within a target.
+    Component {
+        /// Target name.
+        target: String,
+        /// Component name.
+        component: String,
+    },
+    /// A canonical selected path.
     Path(PathBuf),
 }
 
+/// Resolves textual selectors against a workspace.
+///
+/// # Errors
+///
+/// Returns an error for malformed, missing, escaping, or ambiguous selectors.
 pub fn resolve_selectors(
     workspace: &Workspace,
     selectors: &[String],

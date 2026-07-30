@@ -1,5 +1,8 @@
+//! Lint workflow planning and execution.
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -21,6 +24,12 @@ use crate::workspace::Workspace;
 
 const SPECIFICATION_PLACEMENT: &str = "specification-placement";
 
+/// Builds a lint plan for selected resources.
+///
+/// # Errors
+///
+/// Returns an error when discovery, provider configuration, policy routing, or
+/// plan validation fails.
 pub fn build_plan(workspace: &Workspace, selections: &[Selection]) -> Result<Plan, WorkflowError> {
     let bindings = bindings_for_selections(workspace, selections)?;
     let resources = resources_for_selections(workspace, selections)?;
@@ -392,6 +401,12 @@ fn is_specification(path: &Path) -> Result<bool, WorkflowError> {
     }
 }
 
+/// Executes a lint plan.
+///
+/// # Errors
+///
+/// Returns an error when preflight, provider execution, interruption cleanup,
+/// or reporting fails.
 pub fn execute_plan(
     workspace: &Workspace,
     plan: &Plan,
@@ -513,7 +528,7 @@ fn policy_report(workspace: &Workspace, step: &Step, duration: u64) -> StepRepor
             relative(workspace, &workspace.config.system.specs).display()
         );
         for path in &step.targets {
-            message.push_str(&format!("  {}\n", relative(workspace, path).display()));
+            let _ = writeln!(message, "  {}", relative(workspace, path).display());
         }
         message
     } else {
@@ -522,16 +537,18 @@ fn policy_report(workspace: &Workspace, step: &Step, duration: u64) -> StepRepor
     report_fields(
         workspace,
         step,
-        failed.then_some(1).or(Some(0)),
-        if failed {
-            StepStatus::Failed
-        } else {
-            StepStatus::Passed
+        ReportOutput {
+            exit_code: failed.then_some(1).or(Some(0)),
+            status: if failed {
+                StepStatus::Failed
+            } else {
+                StepStatus::Passed
+            },
+            duration,
+            stdout: String::new(),
+            stderr,
+            argv: Vec::new(),
         },
-        duration,
-        String::new(),
-        stderr,
-        Vec::new(),
     )
 }
 
@@ -550,30 +567,31 @@ fn command_report(
     report_fields(
         workspace,
         step,
-        output.status.code(),
-        if output.status.success() {
-            StepStatus::Passed
-        } else {
-            StepStatus::Failed
+        ReportOutput {
+            exit_code: output.status.code(),
+            status: if output.status.success() {
+                StepStatus::Passed
+            } else {
+                StepStatus::Failed
+            },
+            duration,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            argv,
         },
-        duration,
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-        argv,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn report_fields(
-    workspace: &Workspace,
-    step: &Step,
+struct ReportOutput {
     exit_code: Option<i32>,
     status: StepStatus,
     duration: u64,
     stdout: String,
     stderr: String,
     argv: Vec<String>,
-) -> StepReport {
+}
+
+fn report_fields(workspace: &Workspace, step: &Step, output: ReportOutput) -> StepReport {
     let (target, component) = match &step.owner {
         Owner::Target(target) => (Some(target.clone()), None),
         Owner::Component { target, component } => (Some(target.clone()), component.clone()),
@@ -588,7 +606,7 @@ fn report_fields(
         cwd: relative(workspace, &step.cwd)
             .to_string_lossy()
             .into_owned(),
-        argv,
+        argv: output.argv,
         configuration_files: step
             .configuration_files
             .iter()
@@ -599,12 +617,12 @@ fn report_fields(
             .iter()
             .map(|path| relative(workspace, path).to_string_lossy().into_owned())
             .collect(),
-        status,
-        exit_code,
-        duration,
+        status: output.status,
+        exit_code: output.exit_code,
+        duration: output.duration,
         skip_reason: None,
-        stdout,
-        stderr,
+        stdout: output.stdout,
+        stderr: output.stderr,
     }
 }
 

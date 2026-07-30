@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for workspace configuration.
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;

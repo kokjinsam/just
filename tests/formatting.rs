@@ -1,3 +1,6 @@
+#![cfg(test)]
+//! Integration tests for formatting workflows.
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -122,7 +125,22 @@ fn format_repository() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
     }
     executable(
         &tools.path().join("java"),
-        "#!/bin/sh\nprintf '%s\\t%s\\t%s\\n' java \"$PWD\" \"$*\" >> \"$FORMAT_LOG\"\nif [ -n \"${TEMP_MODE_LOG:-}\" ]; then\n  (/usr/bin/stat -c '%a' \"$5\" 2>/dev/null || /usr/bin/stat -f '%Lp' \"$5\") > \"$TEMP_MODE_LOG\"\nfi\ncase \"${JAVA_MODE:-copy}\" in\n  copy) /bin/cp \"$4\" \"$5\" ;;\n  change) printf '%s\\n' formatted > \"$5\" ;;\n  fail) printf '%s\\n' partial > \"$5\"; printf '%s\\n' java-failed >&2; exit 23 ;;\nesac\n",
+        concat!(
+            "#!/bin/sh\n",
+            "printf '%s\\t%s\\t%s\\n' java \"$PWD\" \"$*\" >> \"$FORMAT_LOG\"\n",
+            "if [ -n \"${TEMP_MODE_LOG:-",
+            "}\" ]; then\n",
+            "  (/usr/bin/stat -c '%a' \"$5\" 2>/dev/null",
+            " || /usr/bin/stat -f '%Lp' \"$5\") > \"$TEMP_MODE_LOG\"\n",
+            "fi\n",
+            "case \"${JAVA_MODE:-",
+            "copy}\" in\n",
+            "  copy) /bin/cp \"$4\" \"$5\" ;;\n",
+            "  change) printf '%s\\n' formatted > \"$5\" ;;\n",
+            "  fail) printf '%s\\n' partial > \"$5\";",
+            " printf '%s\\n' java-failed >&2; exit 23 ;;\n",
+            "esac\n",
+        ),
     );
     let jar = repository.path().join("tla2tools.jar");
     fs::write(&jar, "stub").unwrap();
@@ -183,7 +201,8 @@ fn valid_selection_without_a_formatter_is_a_successful_zero_step_no_op() {
 #[cfg(unix)]
 #[test]
 fn repository_target_component_directory_file_and_ignored_file_scopes_are_isolated() {
-    let cases: &[(&[&str], &[&str], &[&str])] = &[
+    type FormatScopeCase<'a> = (&'a [&'a str], &'a [&'a str], &'a [&'a str]);
+    let cases: &[FormatScopeCase<'_>] = &[
         (&["format"], &["mix", "pnpm", "cargo", "java"], &[]),
         (&["format", "@api"], &["mix", "pnpm", "cargo"], &["java"]),
         (
@@ -744,7 +763,11 @@ fn oxfmt_routes_only_the_frozen_extensions_and_empty_work_is_a_no_op() {
             argv.iter()
                 .any(|argument| argument == "--no-error-on-unmatched-pattern")
         );
-        assert!(argv.iter().all(|argument| !argument.ends_with(".py")));
+        assert!(argv.iter().all(|argument| {
+            !Path::new(argument)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        }));
         for extension in [
             "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "css", "scss",
         ] {

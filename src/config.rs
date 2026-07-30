@@ -1,3 +1,5 @@
+//! Loading and validation of `just.yaml` workspace configuration.
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component as PathComponent, Path, PathBuf};
@@ -6,32 +8,49 @@ use serde::Deserialize;
 
 use crate::error::WorkflowError;
 
+/// Validated workspace configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
+    /// Canonical workspace root.
     pub root: PathBuf,
+    /// Canonical system resource paths.
     pub system: SystemPaths,
+    /// Optional repository-wide coverage threshold.
     pub coverage_lines: Option<u8>,
+    /// Targets keyed by configured name.
     pub targets: BTreeMap<String, Target>,
 }
 
+/// Configured repository-level resource paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemPaths {
+    /// Canonical specification directory.
     pub specs: PathBuf,
+    /// Canonical application-test directory.
     pub tests: PathBuf,
 }
 
+/// A configured workflow target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
+    /// Target name.
     pub name: String,
+    /// Canonical target root.
     pub root: PathBuf,
+    /// Target components.
     pub components: Vec<Component>,
 }
 
+/// A configured or implicit target component.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Component {
+    /// Optional explicit component name.
     pub name: Option<String>,
+    /// Canonical component root.
     pub root: PathBuf,
+    /// Optional component-specific coverage threshold.
     pub coverage_lines: Option<u8>,
+    /// Whether this is the implicit component for its target.
     pub implicit: bool,
 }
 
@@ -82,38 +101,16 @@ struct RawComponent {
 }
 
 impl WorkspaceConfig {
+    /// Loads and validates `just.yaml` beneath `root`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration cannot be read, parsed, resolved,
+    /// or validated.
     pub fn load(root: &Path) -> Result<Self, WorkflowError> {
-        let root = fs::canonicalize(root).map_err(|error| {
-            WorkflowError::Configuration(format!(
-                "cannot access workspace root '{}': {error}",
-                root.display()
-            ))
-        })?;
-        let config_path = root.join("just.yaml");
-        let source = fs::read_to_string(&config_path).map_err(|error| {
-            WorkflowError::Configuration(format!(
-                "cannot read '{}': {error}",
-                config_path.display()
-            ))
-        })?;
-        let raw: RawConfig = serde_yaml_ng::from_str(&source).map_err(|error| {
-            WorkflowError::Configuration(format!(
-                "cannot parse '{}': {error}",
-                config_path.display()
-            ))
-        })?;
+        let (root, raw) = read_config(root)?;
 
-        if raw.version != 1 {
-            return Err(WorkflowError::Configuration(format!(
-                "unsupported configuration version {}; only version 1 is supported",
-                raw.version
-            )));
-        }
-        if raw.targets.is_empty() {
-            return Err(WorkflowError::Configuration(
-                "targets must contain at least one target".into(),
-            ));
-        }
+        validate_header(&raw)?;
 
         let coverage_lines = validate_coverage(raw.coverage.as_ref(), "repository")?;
         let mut targets = BTreeMap::new();
@@ -210,6 +207,38 @@ impl WorkspaceConfig {
             targets,
         })
     }
+}
+
+fn read_config(root: &Path) -> Result<(PathBuf, RawConfig), WorkflowError> {
+    let root = fs::canonicalize(root).map_err(|error| {
+        WorkflowError::Configuration(format!(
+            "cannot access workspace root '{}': {error}",
+            root.display()
+        ))
+    })?;
+    let config_path = root.join("just.yaml");
+    let source = fs::read_to_string(&config_path).map_err(|error| {
+        WorkflowError::Configuration(format!("cannot read '{}': {error}", config_path.display()))
+    })?;
+    let raw = serde_yaml_ng::from_str(&source).map_err(|error| {
+        WorkflowError::Configuration(format!("cannot parse '{}': {error}", config_path.display()))
+    })?;
+    Ok((root, raw))
+}
+
+fn validate_header(raw: &RawConfig) -> Result<(), WorkflowError> {
+    if raw.version != 1 {
+        return Err(WorkflowError::Configuration(format!(
+            "unsupported configuration version {}; only version 1 is supported",
+            raw.version
+        )));
+    }
+    if raw.targets.is_empty() {
+        return Err(WorkflowError::Configuration(
+            "targets must contain at least one target".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_owner_roots(
