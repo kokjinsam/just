@@ -20,6 +20,7 @@ libc = "0.2.180"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
+semver = "1.0.27"
 signal-hook = "0.3.18"
 tempfile = "3.24.0"
 thiserror = "2.0.18"

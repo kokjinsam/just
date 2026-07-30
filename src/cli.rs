@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::application_testing::{self, ApplicationSuite};
 use crate::capability::Capability;
 use crate::checking;
 use crate::doctor;
@@ -175,20 +176,41 @@ pub fn run(cli: &Cli, current: &Path, caller: Option<&OsStr>) -> u8 {
 }
 
 fn run_test(cli: &Cli, workspace: &Workspace, args: &TestArgs) -> u8 {
+    if let Some(application_suite) = args
+        .arguments
+        .first()
+        .and_then(|value| ApplicationSuite::parse(value))
+    {
+        if args.arguments.len() != 1 {
+            return render_error(
+                cli.output,
+                &WorkflowError::Usage(
+                    "application test suites do not accept target or path selectors".into(),
+                ),
+            );
+        }
+        let mut plan = match application_testing::build_plan(
+            workspace,
+            application_suite,
+            &args.passthrough,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return render_error(cli.output, &error),
+        };
+        let (report, child_stdout, child_stderr) = match application_testing::execute_plan(
+            workspace,
+            &mut plan,
+            args.arguments.clone(),
+            unix_timestamp(),
+        ) {
+            Ok(result) => result,
+            Err(error) => return render_error(cli.output, &error),
+        };
+        return render_completed(cli.output, &report, &child_stdout, &child_stderr);
+    }
     let (suite, selector_arguments) = match args.arguments.first() {
         Some(first) if TestSuite::parse(first).is_some() => {
             (TestSuite::parse(first), &args.arguments[1..])
-        }
-        Some(first)
-            if matches!(
-                first.as_str(),
-                "application" | "contract" | "e2e" | "visual" | "ui-property"
-            ) =>
-        {
-            return render_error(
-                cli.output,
-                &WorkflowError::Usage(format!("test suite '{first}' is reserved for milestone 8")),
-            );
         }
         _ => (None, args.arguments.as_slice()),
     };
@@ -196,6 +218,44 @@ fn run_test(cli: &Cli, workspace: &Workspace, args: &TestArgs) -> u8 {
         Ok(selections) => selections,
         Err(error) => return render_error(cli.output, &error),
     };
+    if args.arguments.is_empty() {
+        let discovery = match application_testing::discover(workspace) {
+            Ok(discovery) => discovery,
+            Err(error) => return render_error(cli.output, &error),
+        };
+        if !discovery.configured_suites().is_empty() {
+            let target_plan = match target_testing::build_plan(
+                workspace,
+                &selections,
+                suite,
+                &args.passthrough,
+                TestMode::Test,
+            ) {
+                Ok(plan) => plan,
+                Err(error) => return render_error(cli.output, &error),
+            };
+            let mut application = match application_testing::build_plan(
+                workspace,
+                ApplicationSuite::Application,
+                &[],
+            ) {
+                Ok(plan) => plan,
+                Err(error) => return render_error(cli.output, &error),
+            };
+            let (report, child_stdout, child_stderr) =
+                match application_testing::execute_with_target(
+                    workspace,
+                    &mut application,
+                    Some(&target_plan),
+                    Vec::new(),
+                    unix_timestamp(),
+                ) {
+                    Ok(result) => result,
+                    Err(error) => return render_error(cli.output, &error),
+                };
+            return render_completed(cli.output, &report, &child_stdout, &child_stderr);
+        }
+    }
     run_target_testing(
         cli,
         workspace,

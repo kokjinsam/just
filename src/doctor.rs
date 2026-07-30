@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::application_testing::{self, ApplicationSuite};
 use crate::capability::{
     Capability, ExCoverallsReadiness, dylint_declaration, excoveralls_readiness,
 };
@@ -355,6 +356,111 @@ pub fn inspect(workspace: &Workspace, started_at: String) -> Result<Report, Work
             Ok(None) => skipped_dylint_report(workspace, manifest),
             Err(error) => failed_dylint_report(workspace, manifest, error.to_string()),
         });
+    }
+    match application_testing::discover(workspace) {
+        Ok(application) if application.configured_suites().is_empty() => {
+            reports.push(step_report(
+                workspace,
+                "application-tests",
+                &Owner::Repository(SystemResource::ApplicationTests),
+                &workspace.config.system.tests,
+                Vec::new(),
+                Vec::new(),
+                StepStatus::Skipped,
+                Some("optional and not configured: no application-test suites were found".into()),
+                String::new(),
+            ));
+        }
+        Ok(application) => {
+            let owner = Owner::Repository(SystemResource::ApplicationTests);
+            reports.push(ready_report(
+                workspace,
+                Check {
+                    provider: "process-compose".into(),
+                    owner: owner.clone(),
+                    root: workspace.root.clone(),
+                    evidence: workspace.root.join("process-compose.yaml"),
+                    configuration_files: vec![workspace.root.join("process-compose.yaml")],
+                    tools: vec![OsString::from("process-compose")],
+                    tla_jar: false,
+                },
+            ));
+            if let Some(report) = reports
+                .iter_mut()
+                .find(|report| report.provider == "process-compose")
+            {
+                report.stderr =
+                    "structural evidence only; semantic dry-run validation occurs during application test execution"
+                        .into();
+            }
+            for suite in application.configured_suites() {
+                let (provider, tool, evidence, configuration_files) = match suite {
+                    ApplicationSuite::Contract => (
+                        "schemathesis",
+                        "uv",
+                        application.openapi_documents()[0].clone(),
+                        vec![
+                            workspace.config.system.tests.join("pyproject.toml"),
+                            workspace.config.system.tests.join("uv.lock"),
+                        ],
+                    ),
+                    ApplicationSuite::E2e => (
+                        "playwright-e2e",
+                        "pnpm",
+                        workspace.config.system.tests.join("e2e"),
+                        vec![
+                            workspace.config.system.tests.join("package.json"),
+                            workspace.config.system.tests.join("playwright.config.ts"),
+                        ],
+                    ),
+                    ApplicationSuite::Visual => (
+                        "playwright-visual",
+                        "pnpm",
+                        workspace.config.system.tests.join("visual"),
+                        vec![
+                            workspace.config.system.tests.join("package.json"),
+                            workspace.config.system.tests.join("playwright.config.ts"),
+                        ],
+                    ),
+                    ApplicationSuite::UiProperty => (
+                        "bombadil",
+                        "pnpm",
+                        workspace
+                            .config
+                            .system
+                            .tests
+                            .join("bombadil/specification.ts"),
+                        vec![workspace.config.system.tests.join("package.json")],
+                    ),
+                    ApplicationSuite::Application => {
+                        unreachable!("aggregate suite is not a configured leaf suite")
+                    }
+                };
+                reports.push(ready_report(
+                    workspace,
+                    Check {
+                        provider: provider.into(),
+                        owner: owner.clone(),
+                        root: workspace.config.system.tests.clone(),
+                        evidence,
+                        configuration_files,
+                        tools: vec![OsString::from(tool)],
+                        tla_jar: false,
+                    },
+                ));
+            }
+        }
+        Err(error) => reports.push(step_report(
+            workspace,
+            "application-tests",
+            &Owner::Repository(SystemResource::ApplicationTests),
+            &workspace.config.system.tests,
+            Vec::new(),
+            Vec::new(),
+            StepStatus::Failed,
+            None,
+            error.to_string(),
+        )),
     }
     reports.sort_by(|left, right| {
         left.cwd

@@ -1,3 +1,4 @@
+pub mod application_testing;
 pub mod capability;
 pub mod checking;
 pub mod cli;
